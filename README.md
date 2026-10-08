@@ -86,23 +86,19 @@
 
 ### DSH 桌面版（desktop profile）
 
-```sh
-# 从 GitHub 安装（桌面 profile 支持 github: 依赖规范）
-dsh plugin --profile desktop add "github:vonvonyung/dsh-task-todo"
+**桌面 profile 由 Electron 应用独占管理，命令行改不动它。**`dsh plugin --profile desktop …`
+会被启动器无条件拒绝：
 
-# 或者指到本地目录（开发形态）
-dsh plugin --profile desktop add "<插件目录的绝对路径>"
+```
+error: profile "desktop" is managed exclusively by the Electron application
 ```
 
-然后**重启桌面版**：bundle 层只在启动时读取。桌面版用自己的窗口加载客户端 bundle，
-不必像浏览器那样 `Ctrl+F5`。完整步骤、验证方法与回滚见
-[docs/desktop-install.md](docs/desktop-install.md)。
+所以请在**桌面版应用内**安装：设置 → 插件（市场）→ 添加插件，填
+`github:vonvonyung/dsh-task-todo`；也可以指向本地目录或本地产出的 `.tgz`。
+装完**完全退出并重启桌面版**（bundle 层只在启动时读取；桌面版用自己的窗口加载客户端
+bundle，不需要像浏览器那样 `Ctrl+F5`）。卸载同样在应用内的插件管理器里做。
 
-卸载：
-
-```sh
-dsh plugin --profile desktop remove dsh-task-todo
-```
+完整步骤、验证方法与回滚见 [docs/desktop-install.md](docs/desktop-install.md)。
 
 ### Web（`dsh web`）
 

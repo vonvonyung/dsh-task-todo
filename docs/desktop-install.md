@@ -12,7 +12,7 @@
 ## 前置
 
 - 已安装 DSH 桌面版，且能正常启动（本机实测线：`@deepseek-ai/dsh` 0.2.0-rc.2）。
-- 命令行里有 `dsh`（桌面版与 `dsh` CLI 共用 `%APPDATA%\npm` 或等价前缀下的同一份安装）。
+- 命令行里有 `dsh`（用来查版本、跑门禁；**注意它管不了 desktop profile**，见「安装」）。
 - Node ≥ 22（只影响开发与门禁；跑插件本身由宿主运行时决定）。
 
 确认 profile 与数据目录（PowerShell）：
@@ -24,30 +24,32 @@ echo $env:DSH_PROFILE_DIR     # 例：C:\Users\<你>\.dsh\profiles\desktop
 
 ## 安装
 
-### 方式 A：从 GitHub 安装（推荐）
+**命令行装不了桌面 profile —— 这是宿主的设计，不是缺步骤。**
 
-桌面 profile 已支持 `github:` 依赖规范：
-
-```sh
-dsh plugin --profile desktop add "github:vonvonyung/dsh-task-todo"
+```console
+$ dsh plugin --profile desktop add "github:vonvonyung/dsh-task-todo"
+error: profile "desktop" is managed exclusively by the Electron application
 ```
 
-### 方式 B：从本地目录安装（开发形态）
+启动器对 `desktop` 这个 profile 名无条件拒绝（`@deepseek-ai/dsh/lib/bin.js` 里的
+`rejectElectronProfile`：没有开关、没有环境变量）。桌面 profile 的依赖只能由
+**应用自身的插件管理器**改；`dsh plugin --profile web …` 不受影响。
 
-```sh
-dsh plugin --profile desktop add "<插件目录的绝对路径>"
-```
+### 在应用内安装
 
-### 生效
+1. 打开桌面版 → **设置 → 插件**（市场 / 插件管理器）。
+2. 添加插件，来源填其一：
+   - `github:vonvonyung/dsh-task-todo`（桌面 profile 里已有三个 `github:` 依赖，这种规范它认）；
+   - 本地目录的绝对路径（开发形态）；
+   - 本地产出的 `dsh-task-todo-<版本>.tgz`（`npm pack` 的结果，profile 里也有 `file:` 先例）。
+3. 装完**完全退出并重启桌面版**：bundle 层只在启动时读取。桌面版用自己的窗口加载
+   客户端 bundle，不需要像浏览器那样 `Ctrl+F5`。
 
-`dsh plugin add` 只更新 profile 的依赖与 bundle 列表；**bundle 层只在启动时读取**，
-所以装完后必须**完全退出并重启桌面版**。桌面版用自己的窗口加载客户端 bundle，
-不需要像浏览器那样 `Ctrl+F5`。
+安装完成后 `<DSH_PROFILE_DIR>\package.json` 里应有两处变化，这也是「到底装上了没」的判据
+（重启前就能查）：
 
-安装会往 `<DSH_PROFILE_DIR>\package.json` 写入：
-
-- `dependencies` 里一条 `"dsh-task-todo": "github:vonvonyung/dsh-task-todo"`（方式 B 则是路径）；
-- `dsh.profile.bundles` 数组里一项 `"dsh-task-todo"`。
+- `dependencies` 增加一条，如 `"dsh-task-todo": "github:vonvonyung/dsh-task-todo"`；
+- `dsh.profile.bundles` 数组增加一项 `"dsh-task-todo"`。
 
 ## 验证
 
@@ -91,12 +93,13 @@ dsh plugin --profile desktop add "<插件目录的绝对路径>"
 
 ## 回滚
 
-```sh
-dsh plugin --profile desktop remove dsh-task-todo
-```
+在**应用内的插件管理器**里移除 `dsh-task-todo`（同样不能用 `dsh plugin --profile desktop remove`，
+理由见「安装」），然后**重启桌面版**。入口与工具随之消失；`<DSH_HOME>/todo/tasks.json`
+保持原样，重新装回即可继续使用（回滚到旧版本：先移除，再装指定版本或本地目录）。
 
-然后**重启桌面版**。入口与工具随之消失；`<DSH_HOME>/todo/tasks.json` 保持原样，
-重新装回即可继续使用（也方便回滚到旧版本：先 `remove`，再 `add` 指定版本或本地目录）。
+命令行兜底（不推荐，且可能被应用下次启动纠正）：在 `<DSH_PROFILE_DIR>\package.json` 里
+删掉那条依赖与 `dsh.profile.bundles` 里那一项，再在 `<DSH_PROFILE_DIR>` 里跑一次
+`pnpm install`。
 
 只想临时停用、不想卸载：设置 → 插件 → 待办任务 → 关掉「启用」。
 
@@ -111,6 +114,11 @@ A：这是本插件要解除的依赖限制的历史症状。当前 `package.jso
 > 只有当比较器集合里存在同一个 `major.minor.patch` 元组上的 prerelease 比较器时才算满足**。
 > 上面那个更宽的范围里，唯一带 prerelease 的下界是 `0.1.0-rc.1`，元组是 0.1.0，套不到
 > `0.2.0-rc.2` 上，npm 会判为 invalid。`^0.2.0-rc.2` 的下界与在用版本同元组，才是正确的写法。
+
+**Q：`dsh plugin --profile desktop add …` 报 “managed exclusively by the Electron application”？**
+A：设计如此。启动器对 `desktop` 这个 profile 名无条件拒绝（`@deepseek-ai/dsh/lib/bin.js` 里的
+`rejectElectronProfile`），桌面 profile 的依赖只能由 Electron 应用自己的插件管理器改 ——
+所以本文档的安装与回滚都走应用内界面。`dsh plugin --profile web …` 不受影响。
 
 **Q：桌面版为什么不认 `platform: "web"` 之外的写法？**
 A：桌面版与 `dsh web` 共用同一个客户端模块加载器，它只加载声明 `platform: "web"` 的
