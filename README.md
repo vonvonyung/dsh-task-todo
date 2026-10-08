@@ -5,7 +5,7 @@
 
 <p align="center">
   <a href="./LICENSE"><img src="https://img.shields.io/badge/license-MIT-0B7285?style=flat-square" alt="MIT License"></a>
-  <a href="https://github.com/deepseek-ai/deepseek-harness"><img src="https://img.shields.io/badge/DSH-Web%20plugin-5B4CF0?style=flat-square" alt="DSH Web plugin"></a>
+  <a href="https://github.com/deepseek-ai/deepseek-harness"><img src="https://img.shields.io/badge/DSH-Web%20%2F%20Desktop%20plugin-5B4CF0?style=flat-square" alt="DSH Web / Desktop plugin"></a>
   <img src="https://img.shields.io/badge/node-%3E%3D22-5FA04E?style=flat-square" alt="Node 22+">
 </p>
 
@@ -80,7 +80,31 @@
 
 ## 安装
 
-前置：已安装 DeepSeek Harness（`dsh`，且 `dsh web` 能跑起来），Node ≥ 22。
+前置：已安装 DeepSeek Harness（`dsh`，且 `dsh web` 能跑起来）或 DSH 桌面版，Node ≥ 22。
+插件的 client 声明为 `platform: "web"` —— 这是宿主客户端加载器唯一接受的值，所以**同一个包
+同时适用于 `dsh web` 与 DSH 桌面版**，不需要为桌面版换一份构建。
+
+### DSH 桌面版（desktop profile）
+
+```sh
+# 从 GitHub 安装（桌面 profile 支持 github: 依赖规范）
+dsh plugin --profile desktop add "github:vonvonyung/dsh-task-todo"
+
+# 或者指到本地目录（开发形态）
+dsh plugin --profile desktop add "<插件目录的绝对路径>"
+```
+
+然后**重启桌面版**：bundle 层只在启动时读取。桌面版用自己的窗口加载客户端 bundle，
+不必像浏览器那样 `Ctrl+F5`。完整步骤、验证方法与回滚见
+[docs/desktop-install.md](docs/desktop-install.md)。
+
+卸载：
+
+```sh
+dsh plugin --profile desktop remove dsh-task-todo
+```
+
+### Web（`dsh web`）
 
 ```sh
 # 从 npm 安装（包发布后可用；当前请先 git clone 再指本地目录）
@@ -98,6 +122,13 @@ dsh plugin --profile web add "<插件目录的绝对路径>"
 ```sh
 dsh plugin --profile web remove dsh-task-todo
 ```
+
+### 数据文件
+
+任务数据默认写在 **`<DSH_HOME>/todo/tasks.json`**（`DSH_HOME` 默认 `~/.dsh`，Windows 下为
+`C:\Users\<你>\.dsh`）。web 与 desktop 两套 profile **共用同一个 `DSH_HOME`**，所以两种形态读写的
+是**同一份数据**：桌面版里加的任务，`dsh web` 里也在 —— 不需要迁移，也不按 profile 分库。
+路径可在 设置 → 插件 → 待办任务 里改（表见下方「配置」）。
 
 ## 配置
 
