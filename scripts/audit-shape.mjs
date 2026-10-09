@@ -158,8 +158,8 @@ ok('the client never re-implements recurrence math',
 
 console.log('--- files expected in the package ---')
 for (const rel of ['lib/index.js', 'lib/client.js', 'lib/store.js', 'lib/recurrence.js',
-  'scripts/check-ready.mjs', 'scripts/test-store.mjs', 'scripts/test-recurrence.mjs',
-  'scripts/test-json-gate.mjs', 'scripts/test-import-markdown.mjs',
+  'lib/feishu.js', 'scripts/check-ready.mjs', 'scripts/test-store.mjs', 'scripts/test-recurrence.mjs',
+  'scripts/test-json-gate.mjs', 'scripts/test-import-markdown.mjs', 'scripts/test-feishu.mjs',
   'scripts/verify-client-render.mjs', 'scripts/audit-shape.mjs',
   'scripts/import-markdown-todos.mjs', 'scripts/smoke-live.mjs',
   'skills/todo/SKILL.md', 'README.md']) {

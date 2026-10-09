@@ -58,7 +58,7 @@ const ctx = {
 mod.apply(ctx)
 
 console.log('--- wiring ---')
-ok('six tools registered', tools.length === 6, tools.map((t) => t.name))
+ok('seven tools registered', tools.length === 7, tools.map((t) => t.name))
 ok('every tool has an output schema and a renderer',
   tools.every((t) => t.output?.schema !== undefined && typeof t.output.render === 'function'))
 ok('the HTTP route is registered', route !== null && route.path === '/todo')
@@ -181,6 +181,18 @@ let ambiguous = null
 try { await call('task_done', { id: '重名任务' }) } catch (e) { ambiguous = e }
 ok('an ambiguous title is refused with candidates', ambiguous !== null && ambiguous.message.includes('id'), ambiguous?.message)
 
+console.log('--- the Feishu sync surface, before it is configured ---')
+// The whole point of this section is that "not configured yet" is a first-class,
+// lossless answer rather than a crash or a payload full of undefined.
+gate('task_sync_feishu action=status (unconfigured)', await call('task_sync_feishu', { action: 'status' }))
+let unconfigured = null
+try { await call('task_sync_feishu', {}) } catch (e) { unconfigured = e }
+ok('an unconfigured sync (the default action) is refused with an actionable message',
+  unconfigured !== null && String(unconfigured.message).includes('未启用'), unconfigured?.message)
+let badAction = null
+try { await call('task_sync_feishu', { action: 'frobnicate' }) } catch (e) { badAction = e }
+ok('an unknown Feishu action is refused', badAction !== null, badAction?.message)
+
 console.log('--- HTTP API surfaces ---')
 const server = http.createServer((req, res) => {
   const url = new URL(req.url, 'http://localhost')
@@ -205,6 +217,7 @@ gate('API state', state.body)
 for (const [method, args] of [
   ['status', {}],
   ['state', {}],
+  ['feishuStatus', {}],
   ['occurrences', { from: '2026-09-01', to: '2026-10-31' }],
   ['exportDocument', {}],
   ['quickAdd', { text: '明天 15:00 交周报 !高 #工作 @紧要' }],
@@ -302,6 +315,13 @@ ok('a missing view context falls back to the list', absent.state.view.kind === '
 const bad = await api('update', { id: 't_nope', title: 'x' })
 ok('API errors use ok:false', bad.body.ok === false && typeof bad.body.error === 'string')
 gate('API error payload', bad.body)
+// A refused sync is an operational answer, not a server error: it must come back
+// through the same ok:false envelope (and stay lossless) like any other refusal.
+const syncDenied = await api('syncFeishu', {})
+ok('API syncFeishu answers ok:false before configuration',
+  syncDenied.status === 200 && syncDenied.body.ok === false
+  && String(syncDenied.body.error).includes('未启用'), syncDenied.body)
+gate('API syncFeishu unconfigured payload', syncDenied.body)
 const missing = await api('noSuchMethod', {})
 ok('unknown methods 404', missing.status === 404, missing.status)
 gate('API unknown-method payload', missing.body)
@@ -372,6 +392,8 @@ for (const [label, rawInput] of [
   ['add', 'add 明天 10:00 站会 !中 #工作'],
   ['add (bad)', 'add'],
   ['done', 'done 交季度报告'],
+  ['sync 状态 (unconfigured)', 'sync 状态'],
+  ['sync (unconfigured)', 'sync'],
   ['bare text (quick add)', '买牛奶 !低'],
   ['unknown-looking text', 'frobnicate'],
 ]) {

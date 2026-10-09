@@ -475,7 +475,7 @@ const hostMod = await import(pathToFileURL(path.join(pkgRoot, 'lib', 'index.js')
 hostMod.apply(hostCtx)
 
 ok('host registered its HTTP route', route !== null && route.path === '/todo')
-ok('host registered six tools', tools.length === 6, tools.map((t) => t.name))
+ok('host registered seven tools', tools.length === 7, tools.map((t) => t.name))
 
 let hostState = { lists: [], tasks: [] }
 const server = http.createServer((req, res) => {

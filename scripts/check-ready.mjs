@@ -21,6 +21,7 @@ const GATES = [
   ['recurrence engine', 'test-recurrence.mjs'],
   ['store, filters and view payloads', 'test-store.mjs'],
   ['markdown todo import (mapping, idempotency, dry run)', 'test-import-markdown.mjs'],
+  ['Feishu Bitable sync (mapping, diff, transport, idempotency)', 'test-feishu.mjs'],
   ['lossless JSON over every tool / HTTP / command surface', 'test-json-gate.mjs'],
   ['client render, registration and interactions', 'verify-client-render.mjs'],
 ]
