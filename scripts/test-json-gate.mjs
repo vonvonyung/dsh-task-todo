@@ -217,6 +217,10 @@ gate('API state', state.body)
 for (const [method, args] of [
   ['status', {}],
   ['state', {}],
+  ['settings', {}],
+  // The value patched here is the schema default, so this stays a transport
+  // check and cannot perturb the assertions further down.
+  ['updateSettings', { badgeCount: 'today' }],
   ['feishuStatus', {}],
   ['occurrences', { from: '2026-09-01', to: '2026-10-31' }],
   ['exportDocument', {}],

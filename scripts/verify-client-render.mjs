@@ -456,12 +456,10 @@ let route = null
 const hostCtx = {
   logger: { info() {}, warn() {}, error() {} },
   tools: { register: (def) => { tools.push(def); return () => {} } },
-  settings: {
-    register: () => ({
-      get: () => ({ enabled: true, weekStart: 1, badgeCount: 'today', defaultList: '收集箱' }),
-      watch: () => () => {},
-    }),
-  },
+  // NOTE: no `settings` service. This host line's `settings` service is
+  // `SettingsForms` (configure/describe/update/schema) and has NO `register`,
+  // which is exactly why the plugin must not call one: a stub here would hide
+  // the regression that made every setting inert (see lib/settings.js).
   provide: () => () => {},
   effect: (fn) => { const dispose = fn(); return typeof dispose === 'function' ? dispose : () => {} },
   get: (key) => {
@@ -659,9 +657,9 @@ ok('nothing else was required', requireCalls.every((id) => id === 'react'), requ
 
 
 const seat = (key) => registrations.find((r) => r.key === key)
-eq('three seats were registered, one per slot',
+eq('four seats were registered, one per slot',
   registrations.map((r) => r.key).sort(),
-  ['main', 'shell.overlay', 'sidebar.panellist'])
+  ['main', 'settings.section', 'shell.overlay', 'sidebar.panellist'])
 ok('every seat registered a component function',
   registrations.every((r) => typeof r.Component === 'function'))
 // The user asked for the panel entry to sit with the global panels, between
@@ -687,6 +685,17 @@ ok('the main seat is keyed so selectPanel("todo") resolves it',
 eq('selectPanel was called with the panel id', layoutCalls, ['todo'])
 
 eq('the overlay seat is a list entry', seat('shell.overlay').options.name, 'shell.overlay')
+
+// settings.section: the plugin's own settings page. It is the ONLY place the
+// Feishu form can live on this host line -- DSH's Plugins page hosts tabs a
+// feature package contributes, and `settings` has no scope API -- so its absence
+// is the bug a user reported, not a cosmetic gap.
+const settingsSeat = seat('settings.section')
+eq('the settings seat is a list entry', settingsSeat.options.name, 'settings.section')
+eq('the settings seat carries its own id', settingsSeat.options.id, 'todo')
+eq('the settings seat labels itself', settingsSeat.options.label(), '待办任务')
+ok('the settings seat carries an order', typeof settingsSeat.options.order, 'number')
+ok('the settings seat registered a component function', typeof settingsSeat.Component === 'function')
 
 eq('the stylesheet was injected exactly once', document._head.children.length, 1)
 eq('the stylesheet is tagged for idempotent re-injection',
@@ -2265,6 +2274,83 @@ section('visual system v2 (computed, not rendered)')
   ok('V6 the narrow tier brings the smart lists back to the header',
     /\.td-head2\{display:flex/.test(rules) && /\.td-head2\{display:none\}/.test(rules))
 }
+
+// ===========================================================================
+section('the settings page')
+// ===========================================================================
+
+// The page is generated from the schema the host sends, so these assertions are
+// really about the wiring: the seat renders, the host answers, a save persists,
+// and the secret travels one way only.
+const Settings = seat('settings.section').Component
+ui.render(React.createElement(Settings, {}))
+ok('the settings page paints a title before the fetch lands',
+  ui.text().includes('待办任务'), ui.text().slice(0, 80))
+await ui.settle()
+const settingsText = ui.text()
+ok('the settings page names the settings file', settingsText.includes('设置文件：'), settingsText.slice(0, 160))
+ok('the general group renders', settingsText.includes('启用插件') && settingsText.includes('侧栏徽标口径'))
+ok('the hotkey group renders', settingsText.includes('全局快捷键') && settingsText.includes('唤起捕获'))
+ok('the Feishu group renders', settingsText.includes('飞书同步'))
+ok('the Feishu credentials render',
+  settingsText.includes('App ID') && settingsText.includes('App Secret')
+  && settingsText.includes('多维表格 app_token') && settingsText.includes('数据表 table_id'),
+  settingsText.slice(0, 200))
+
+const inputFor = (label) => ui.byClass('td-set-input').find((n) => n.props['aria-label'] === label)
+const boxFor = (label) => ui.byClass('td-set-check').find((n) => n.props['aria-label'] === label)
+ok('the App ID input exists', inputFor('App ID') !== undefined)
+ok('the app_token input exists', inputFor('多维表格 app_token') !== undefined)
+eq('the secret renders as a password field', inputFor('App Secret').props.type, 'password')
+eq('a saved secret is signalled by the placeholder before anything is stored',
+  inputFor('App Secret').props.placeholder, '')
+ok('the sync buttons exist unclicked',
+  ui.byClass('td-set-btn').some((n) => ui.text(n) === '预览同步')
+  && ui.byClass('td-set-btn').some((n) => ui.text(n).includes('立即同步')))
+
+// Fill the four credentials the way a user would, then save. Each keystroke is
+// followed by a settle and a RE-QUERY, because the save button's handler closes
+// over the draft of the render it came from: clicking the stale node would post
+// the pre-typing values (the same trap the note editor documents above).
+const typeInto = async (label, value) => {
+  inputFor(label).props.onChange({ target: { value } })
+  await ui.settle(2)
+}
+const toggle = async (label, checked) => {
+  boxFor(label).props.onChange({ target: { checked } })
+  await ui.settle(2)
+}
+const press = async (label) => {
+  ui.byClass('td-set-btn').find((n) => ui.text(n) === label).props.onClick({})
+  await ui.settle(2)
+}
+
+await typeInto('App ID', 'cli_from_ui')
+await typeInto('App Secret', 'secret_from_ui')
+await typeInto('多维表格 app_token', 'bascn_from_ui')
+await typeInto('数据表 table_id', 'tbl_from_ui')
+await toggle('启用飞书同步', true)
+await press('保存')
+ok('saving reports success', ui.text().includes('设置已保存'), ui.text().slice(0, 240))
+
+const savedForm = await api('settings')
+eq('the App ID reached the host', savedForm.values.feishu.appId, 'cli_from_ui')
+eq('the app_token reached the host', savedForm.values.feishu.appToken, 'bascn_from_ui')
+eq('the table id reached the host', savedForm.values.feishu.tableId, 'tbl_from_ui')
+eq('the Feishu switch was saved', savedForm.values.feishu.enabled, true)
+eq('the secret is stored but never echoed', savedForm.values.feishu.appSecret, '')
+eq('the host knows a secret is stored', savedForm.secretSet, true)
+eq('the form now says the sync is configured', savedForm.error, null)
+ok('the field now advertises the stored secret',
+  inputFor('App Secret').props.placeholder.includes('已保存'), inputFor('App Secret').props.placeholder)
+
+// A partial save must not blank what the user did not touch.
+await typeInto('App ID', 'cli_second_edit')
+await press('保存')
+const secondForm = await api('settings')
+eq('the second save applied', secondForm.values.feishu.appId, 'cli_second_edit')
+eq('and kept the secret', secondForm.secretSet, true)
+eq('and kept the switch', secondForm.values.feishu.enabled, true)
 
 // ===========================================================================
 // summary

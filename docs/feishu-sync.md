@@ -58,13 +58,13 @@ Lark 国际版把接口域名设为 `https://open.larksuite.com`（设置里的 
 
 ## 4. 插件设置
 
-设置 → 插件 → 待办任务 → **飞书同步**：
+设置 → 待办任务 → **飞书同步**：
 
 | 项 | 默认 | 说明 |
 | --- | --- | --- |
 | 启用 | 关 | 总开关；未启用时 `/todo sync` 会拒绝并提示 |
 | appId | 空 | 自建应用 App ID |
-| appSecret | 空 | 自建应用 App Secret（只写在本机 `settings.yaml`） |
+| appSecret | 空 | 自建应用 App Secret（只写在本机 `<DSH_HOME>/todo/settings.json`，保存后不再回显） |
 | appToken | 空 | 多维表格 app_token |
 | tableId | 空 | 数据表 table_id |
 | baseUrl | `https://open.feishu.cn` | 国际版填 `https://open.larksuite.com` |
@@ -73,6 +73,11 @@ Lark 国际版把接口域名设为 `https://open.larksuite.com`（设置里的 
 | 含已完成 | 开 | 关闭则已完成任务不写入远端 |
 | 删除远端行 | 开 | 本地删除的任务，同时删除远端对应行 |
 | keyField | `任务ID` | 匹配用的列名 |
+
+设置值落在 **`<DSH_HOME>/todo/settings.json`**（普通 JSON，可手动编辑 / 备份）。无界面环境
+（例如 `dsh headless`）也可以配：在那个文件里写 `{"feishu": {"enabled": true, "appId": "…"}}`，
+或者给 profile 的 `cordis.patch.yml` 里 `todo` 条目加一个 `config:` 块（作为种子层，settings.json
+优先）。改完重启宿主即可。
 
 ## 5. 同步语义
 
@@ -91,6 +96,7 @@ Lark 国际版把接口域名设为 `https://open.larksuite.com`（设置里的 
 
 | 方式 | 用法 |
 | --- | --- |
+| 设置页 | 设置 → 待办任务 → 「预览同步」/「立即同步」（先保存再执行） |
 | Agent 工具 | `task_sync_feishu`：`action=status`（不联网）/ `action=sync`（可 `dryRun`、`prune`） |
 | 斜杠命令 | `/todo sync`、`/todo sync 状态`、`/todo sync 预览` |
 | HTTP（界面/脚本） | `POST /todo/api/syncFeishu`、`POST /todo/api/feishuStatus` |
@@ -114,8 +120,8 @@ Lark 国际版把接口域名设为 `https://open.larksuite.com`（设置里的 
 
 ## 8. 安全
 
-- `appSecret` 只写在本机 `settings.yaml`，插件的状态接口**不会**把它返回给界面或模型
-  （`feishuStatus()` 显式做了脱敏）。
+- `appSecret` 只写在本机 `<DSH_HOME>/todo/settings.json`，插件的状态接口**不会**把它返回给
+  界面或模型（`feishuStatus()` 脱敏，设置页也只回一个「已保存」标记）。
 - 建议给自建应用只开多维表格相关权限，并只在需要的表格上添加协作者。
 - 同步是**单向**的（DSH → 飞书）：飞书里手改的行，下次同步会被本地状态覆盖；
   不带 `任务ID` 的手写行不受影响。
