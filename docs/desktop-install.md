@@ -84,12 +84,26 @@ error: profile "desktop" is managed exclusively by the Electron application
 共用同一个 `DSH_HOME`**，因此两种形态读到、写到的是**同一份数据**：桌面版加的任务，
 `dsh web` 里也在。不需要迁移，也不按 profile 分库。
 
-- 想换路径：设置 → 插件 → 待办任务 → 「数据文件」。
+- 想换路径：设置 → 待办任务 → 「数据文件」。
 - 备份 / 恢复 / 复制路径：面板左侧栏「数据」分组有三个按钮。
 - **卸载不会删除这个文件** —— 任务数据独立于安装。
 
 > 注意：这是本插件（`dsh-task-todo`）的数据。另一个插件 `dsh-todos` 用的
 > `~/.dsh/dsh-todos/todos.json` 是**另一份**数据，两者互不影响。
+
+## 插件设置
+
+插件自己有一页设置：**设置 → 待办任务**（与「插件市场」「AI 任务台」并列；桌面版和
+`dsh web` 都一样）。里面是插件开关、数据文件、日历周起始、徽标口径、全局快捷键，以及
+**飞书同步**整组（App ID / App Secret / app_token / table_id / 自动同步…）。
+
+它的值写在 **`<DSH_HOME>/todo/settings.json`**，和 `tasks.json` 分开，所以卸载、回滚、
+删任务文件都不会动它；改完立即生效，不需要重启。
+
+> 为什么不是 DSH 的「内置插件」页？那一页只挂**插件自己注册的标签页**，而这一版 DSH 的
+> `settings` 服务（`SettingsForms`）没有 `register(scope, schema)` 这种接口，插件的 schema
+> 不会被自动渲染。所以本插件自带设置页 —— 这也是「插件市场 / AI 任务台 / 风格图库」同一
+> 条路子。
 
 ## 回滚
 
@@ -101,7 +115,7 @@ error: profile "desktop" is managed exclusively by the Electron application
 删掉那条依赖与 `dsh.profile.bundles` 里那一项，再在 `<DSH_PROFILE_DIR>` 里跑一次
 `pnpm install`。
 
-只想临时停用、不想卸载：设置 → 插件 → 待办任务 → 关掉「启用」。
+只想临时停用、不想卸载：设置 → 待办任务 → 关掉「启用插件」。
 
 ## 常见问题
 

@@ -81,6 +81,20 @@ ok('the client injects its stylesheet with a real element',
 ok('the stylesheet tag carries a stable key for idempotent injection',
   /dataset\.pluginCss\s*=/.test(clientCode) && /querySelector\(\s*`style\[data-plugin-css=/.test(clientCode))
 
+// The recorded incident this audit exists for: `ctx.settings.register(scope,
+// schema)` was called inside a try/catch. On this DSH line the `settings`
+// service is `SettingsForms` (configure / describe / update / schema) and has no
+// `register`, so the call threw, the catch swallowed it, and EVERY setting --
+// Feishu included -- was silently inert. Settings are now the plugin's own
+// document (`lib/settings.js`) with its own page; reaching for a host scope API
+// again must fail here instead of at the user.
+ok('the host never calls ctx.settings.register',
+  !/ctx\s*\.\s*settings\s*\.\s*register/.test(hostCode))
+ok('the host never touches ctx.settings at all', !/ctx\.settings\b/.test(hostCode))
+ok('the host reads a settings document of its own', /from '\.\/settings\.js'/.test(hostCode))
+ok('the client contributes a settings page of its own',
+  /slots\.inject\(\s*['"]settings\.section['"]/.test(clientCode))
+
 console.log('--- plain JavaScript only ---')
 for (const [name, source] of [['client', clientCode], ['host', hostCode], ['store', stripComments(store)]]) {
   ok(`${name}: no import statements in the client form`, name !== 'client' || !/^\s*import\s/m.test(source))
@@ -158,7 +172,8 @@ ok('the client never re-implements recurrence math',
 
 console.log('--- files expected in the package ---')
 for (const rel of ['lib/index.js', 'lib/client.js', 'lib/store.js', 'lib/recurrence.js',
-  'lib/feishu.js', 'scripts/check-ready.mjs', 'scripts/test-store.mjs', 'scripts/test-recurrence.mjs',
+  'lib/feishu.js', 'lib/settings.js', 'scripts/check-ready.mjs', 'scripts/test-store.mjs',
+  'scripts/test-recurrence.mjs', 'scripts/test-settings.mjs',
   'scripts/test-json-gate.mjs', 'scripts/test-import-markdown.mjs', 'scripts/test-feishu.mjs',
   'scripts/verify-client-render.mjs', 'scripts/audit-shape.mjs',
   'scripts/import-markdown-todos.mjs', 'scripts/smoke-live.mjs',

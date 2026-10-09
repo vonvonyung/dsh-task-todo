@@ -315,13 +315,13 @@ eq('an empty workspace syncs zero rows', [empty.local, empty.created], [0, 0])
 
 console.log('--- the service surface (settings -> sync -> status) ---')
 const serviceServer = makeFeishuServer()
-const svc = new TodoService(null, () => {}, { fetch: serviceServer.fetch })
+const svc = new TodoService(null, () => {}, { fetch: serviceServer.fetch, settingsFile: path.join(dir, 'svc-settings.json') })
 svc.applySettings({
   dataFile: path.join(dir, 'service.json'),
   feishu: { enabled: true, appId: 'cli_x', appSecret: 'top-secret', appToken: 'bascn', tableId: 'tbl' },
 })
-// The deep merge is load-bearing: a settings.yaml that sets only the four ids
-// must keep the documented defaults for everything else.
+// The deep merge is load-bearing: a settings document that sets only the four
+// ids must keep the documented defaults for everything else.
 eq('a partial Feishu block keeps the other defaults', svc.settings.feishu.baseUrl, FEISHU_DEFAULTS.baseUrl)
 eq('a partial Feishu block keeps autoSync off', svc.settings.feishu.autoSync, false)
 const initial = svc.feishuStatus()
@@ -340,7 +340,7 @@ eq('status records what the last sync did', after.lastSync.summary.created, 1)
 gate('feishuStatus after a sync is lossless JSON', after)
 
 const failing2 = makeFeishuServer({ badAuth: true })
-const svc2 = new TodoService(null, () => {}, { fetch: failing2.fetch })
+const svc2 = new TodoService(null, () => {}, { fetch: failing2.fetch, settingsFile: path.join(dir, 'svc2-settings.json') })
 svc2.applySettings({
   dataFile: path.join(dir, 'service2.json'),
   feishu: { enabled: true, appId: 'a', appSecret: 'b', appToken: 'c', tableId: 'd' },
@@ -355,7 +355,7 @@ gate('feishuStatus after a failure is lossless JSON', svc2.feishuStatus())
 
 console.log('--- auto-sync is opt-in and debounced ---')
 const autoServer = makeFeishuServer()
-const auto = new TodoService(null, () => {}, { fetch: autoServer.fetch })
+const auto = new TodoService(null, () => {}, { fetch: autoServer.fetch, settingsFile: path.join(dir, 'auto-settings.json') })
 auto.applySettings({
   dataFile: path.join(dir, 'auto.json'),
   feishu: { enabled: true, appId: 'a', appSecret: 'b', appToken: 'c', tableId: 'd', autoSync: false },
