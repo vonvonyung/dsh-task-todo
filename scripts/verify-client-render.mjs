@@ -2299,11 +2299,16 @@ section('visual system v2 (computed, not rendered)')
     ok('V4 --td-accent never leaves the floating window', offenders.length === 0, offenders)
   }
 
-  // --- V5: one language for the five states --------------------------------
-  ok('V5 hover moves the fill (--td-soft) rather than the geometry',
-    /\.td-item:hover\{[^}]*var\(--td-soft\)/.test(rules))
+  // The property is "hover moves the FILL, never the geometry". It used to be
+  // asserted through --td-soft; the fill is now the interaction wash (--td-hover),
+  // which is the stronger form of the same rule: a wash lands visibly on a card,
+  // on an inset row and on the canvas, where a fixed surface token cannot promise
+  // it. The second half is the point of the assertion, so it is checked directly.
+  ok('V5 hover moves the fill (the interaction wash) rather than the geometry',
+    /\.td-item:hover\{[^}]*background:var\(--td-hover\)/.test(rules)
+    && !/\.td-item:hover\{[^}]*(padding|margin|transform|min-height)/.test(rules))
   ok('V5 the focus ring is an ink wash, not the surface colour',
-    /color-mix\(in srgb,var\(--td-text\) 18%,transparent\)/.test(rules))
+    /box-shadow:0 0 0 3px color-mix\(in srgb,var\(--td-text\) 12%,transparent\)/.test(rules))
   ok('V5 selection is an inset ink edge plus a same-layer fill',
     /inset 3px 0 0 var\(--td-text\)/.test(rules) && /\.td-item\.cur\{[^}]*var\(--td-field\)/.test(rules))
   ok('V5 a dragged source is one opacity', /\.td-card\.dragging\{opacity:\.5\}/.test(rules)
