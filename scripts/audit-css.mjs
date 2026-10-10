@@ -195,11 +195,14 @@ ok('the aliases resolve to host tokens', mapped >= 10, mapped)
 const cssRules = css.replace(/\/\*[\s\S]*?\*\//g, ' ')
 const LITERAL_COLOURS = new Set([
   '#8b97a6', '#e0a53c', '#1f9d61', '#e56d24',
-  // 奶白 + 蓝, the floating window's skin: a semantic HUE pair, plus the two ink
-  // tones that keep a light card readable under the dark theme. Same rule as the
-  // four above -- declared once, in the alias block, and only ever used as a
-  // surface or mixed into one.
-  '#fffaf1', '#f6eedd', '#2f6bff', '#16233a', '#4d6076',
+  // 奶白 + 蓝: the floating window's cream pair, plus the two ink tones that keep
+  // a light card readable under the dark theme. And the gallery blue -- since v5
+  // the WHOLE plugin's accent (primary / selection / focus), declared once in
+  // the alias block as --td-accent and shared with the floating window's skin,
+  // which is what makes the window read as a piece of the plugin. Same rule as
+  // the hues above -- declared once, and only ever used as a surface or mixed
+  // into one.
+  '#fffaf1', '#f6eedd', '#3b82f6', '#16233a', '#4d6076',
 ])
 const literals = [...new Set((cssRules.match(/#[0-9a-fA-F]{3,8}\b/g) ?? []).map((c) => c.toLowerCase()))]
 const stray = literals.filter((c) => !LITERAL_COLOURS.has(c)).sort()

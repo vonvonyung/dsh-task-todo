@@ -2288,15 +2288,14 @@ section('visual system v2 (computed, not rendered)')
     /--td-canvas/.test(darkBlock) && /--td-card/.test(darkBlock) && /--td-text-3/.test(darkBlock),
     darkBlock.slice(0, 160))
   {
-    const offenders = []
-    for (const rule of parsed) {
-      if (!/var\(--td-accent\)/.test(rule.body)) continue
-      // The floating window's skin, and only that: --td-accent is a hue the
-      // greyscale panel has no business showing (D17).
-      const scoped = /^\.td-float|^\.td-flogo|^\.td-cmp|^@keyframes|\.td-float|\.td-flogo|\.td-cmp/.test(rule.sel)
-      if (!scoped) offenders.push(rule.sel)
-    }
-    ok('V4 --td-accent never leaves the floating window', offenders.length === 0, offenders)
+    // v5 flipped D17 on purpose: the gallery blue is now the WHOLE plugin's
+    // accent (primary / selection / focus), and the floating window shares it
+    // instead of owning a private one. What must not drift is the declaration:
+    // one literal, in the token map, that every surface inherits -- a second
+    // declaration would let the panel and the window slowly become two blues.
+    const decls = parsed.filter((rule) => /--td-accent\s*:/.test(rule.body))
+    ok('V5 the accent is declared once, on the seat marker',
+      decls.length === 1 && /\.td-seat/.test(decls[0].sel), decls.map((rule) => rule.sel))
   }
 
   // The property is "hover moves the FILL, never the geometry". It used to be
@@ -2307,13 +2306,15 @@ section('visual system v2 (computed, not rendered)')
   ok('V5 hover moves the fill (the interaction wash) rather than the geometry',
     /\.td-item:hover\{[^}]*background:var\(--td-hover\)/.test(rules)
     && !/\.td-item:hover\{[^}]*(padding|margin|transform|min-height)/.test(rules))
-  ok('V5 the focus ring is an ink wash, not the surface colour',
-    /box-shadow:0 0 0 3px color-mix\(in srgb,var\(--td-text\) 12%,transparent\)/.test(rules))
-  ok('V5 selection is an inset ink edge plus a same-layer fill',
-    /inset 3px 0 0 var\(--td-text\)/.test(rules) && /\.td-item\.cur\{[^}]*var\(--td-field\)/.test(rules))
+  // v5: the ring is an ACCENT wash rather than an ink one -- the blue is the
+  // single hue the chrome spends, and focus is one of its three jobs.
+  ok('V5 the focus ring is an accent wash, not the surface colour',
+    /box-shadow:0 0 0 3px color-mix\(in srgb,var\(--td-accent\) 18%,transparent\)/.test(rules))
+  ok('V5 selection is an inset accent edge plus a same-layer fill',
+    /inset 3px 0 0 var\(--td-accent\)/.test(rules) && /\.td-item\.cur\{[^}]*var\(--td-field\)/.test(rules))
   ok('V5 a dragged source is one opacity', /\.td-card\.dragging\{opacity:\.5\}/.test(rules)
     && /\.td-lrow\.dragging\{opacity:\.5\}/.test(rules))
-  ok('V5 a drop target is one ring', /0 0 0 2px var\(--td-text-2\)/.test(rules))
+  ok('V5 a drop target is one ring', /0 0 0 2px var\(--td-accent\)/.test(rules))
   ok('V5 completed work uses the inset surface in both themes',
     /\.td-item\.done\{[^}]*var\(--td-soft\)/.test(rules))
   ok('V5 the celebration uses the plugin ink, not the window blue',
