@@ -193,6 +193,25 @@ let badAction = null
 try { await call('task_sync_feishu', { action: 'frobnicate' }) } catch (e) { badAction = e }
 ok('an unknown Feishu action is refused', badAction !== null, badAction?.message)
 
+// The four setup/diagnosis actions must refuse cleanly when nothing is
+// configured: they are the buttons a user clicks FIRST, so a stack trace here
+// would be the first thing they ever see of this feature.
+//
+// `test` / `fields` / `reconcile` are pre-enable actions, so their refusal is
+// about the credentials. `pull` writes local tasks, so it belongs with `sync`
+// behind the enable switch -- and says so.
+for (const action of ['test', 'fields', 'reconcile']) {
+  let refused = null
+  try { await call('task_sync_feishu', { action }) } catch (e) { refused = e }
+  ok(`task_sync_feishu action=${action} refuses before configuration`, refused !== null, refused?.message)
+  ok(`task_sync_feishu action=${action} names the missing settings`,
+    refused !== null && String(refused.message).includes('缺少配置'), refused?.message)
+}
+let pullRefused = null
+try { await call('task_sync_feishu', { action: 'pull' }) } catch (e) { pullRefused = e }
+ok('task_sync_feishu action=pull is behind the enable switch',
+  pullRefused !== null && String(pullRefused.message).includes('未启用'), pullRefused?.message)
+
 console.log('--- HTTP API surfaces ---')
 const server = http.createServer((req, res) => {
   const url = new URL(req.url, 'http://localhost')
@@ -326,6 +345,21 @@ ok('API syncFeishu answers ok:false before configuration',
   syncDenied.status === 200 && syncDenied.body.ok === false
   && String(syncDenied.body.error).includes('未启用'), syncDenied.body)
 gate('API syncFeishu unconfigured payload', syncDenied.body)
+// The settings page drives these four directly, so they owe the same envelope.
+// The three pre-enable actions complain about credentials; `pull` is behind the
+// switch like `sync`.
+for (const method of ['feishuTest', 'feishuFields', 'feishuReconcile']) {
+  const denied = await api(method, {})
+  ok(`API ${method} answers ok:false before configuration`,
+    denied.status === 200 && denied.body.ok === false
+    && String(denied.body.error).includes('缺少配置'), denied.body)
+  gate(`API ${method} unconfigured payload`, denied.body)
+}
+const pullDenied = await api('feishuPull', {})
+ok('API feishuPull answers ok:false while the switch is off',
+  pullDenied.status === 200 && pullDenied.body.ok === false
+  && String(pullDenied.body.error).includes('未启用'), pullDenied.body)
+gate('API feishuPull unconfigured payload', pullDenied.body)
 const missing = await api('noSuchMethod', {})
 ok('unknown methods 404', missing.status === 404, missing.status)
 gate('API unknown-method payload', missing.body)

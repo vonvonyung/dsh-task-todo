@@ -2305,8 +2305,22 @@ eq('the secret renders as a password field', inputFor('App Secret').props.type, 
 eq('a saved secret is signalled by the placeholder before anything is stored',
   inputFor('App Secret').props.placeholder, '')
 ok('the sync buttons exist unclicked',
-  ui.byClass('td-set-btn').some((n) => ui.text(n) === '预览同步')
-  && ui.byClass('td-set-btn').some((n) => ui.text(n).includes('立即同步')))
+  ui.byClass('td-set-btn').some((n) => ui.text(n).includes('立即同步')))
+// The Feishu action row, in the order the work is actually done. These are the
+// buttons a user clicks BEFORE anything is configured, so their absence -- or a
+// crash on click -- is the entire first-run experience.
+for (const label of ['测试连接', '补全字段', '预览同步', '完整对账', '从飞书补洞（预览）', '从飞书补洞']) {
+  ok(`the settings page offers ${label}`,
+    ui.byClass('td-set-btn').some((n) => ui.text(n) === label),
+    ui.byClass('td-set-btn').map((n) => ui.text(n)))
+}
+// Unconfigured deployment: the host refuses, and the page owes the user that
+// refusal as a message -- not a broken report block, and not a blank screen.
+ui.byClass('td-set-btn').find((n) => ui.text(n) === '完整对账').props.onClick({})
+await ui.settle(3)
+ok('a refused action reports the host error',
+  ui.text().includes('缺少配置') || ui.text().includes('未启用'), ui.text().slice(0, 260))
+ok('and draws no report block for a refusal', ui.byClass('td-set-report').length === 0)
 
 // Fill the four credentials the way a user would, then save. Each keystroke is
 // followed by a settle and a RE-QUERY, because the save button's handler closes

@@ -13,8 +13,9 @@ import { isJsonValue, snapshotJsonValue } from '@deepseek-ai/dsh-util-values'
 
 import { TodoStore } from '../lib/store.js'
 import {
-  BATCH_LIMIT, FEISHU_DEFAULTS, FeishuClient, FeishuSync, asText, chunk, diffSync,
-  keyedRemoteCount, missingFeishuSettings, normalizeFeishuSettings, statusLabel, taskToFields,
+  BATCH_LIMIT, COLUMN_TYPE_TEXT, FEISHU_DEFAULTS, FEISHU_FIELDS, FeishuClient, FeishuSync, asText, chunk,
+  diffSync, keyedRemoteCount, missingColumns, missingFeishuSettings, normalizeFeishuSettings,
+  remoteRowToTask, requiredColumns, statusLabel, taskToFields,
 } from '../lib/feishu.js'
 import { TodoService } from '../lib/index.js'
 
@@ -42,7 +43,13 @@ const fixedNow = () => new Date('2026-09-17T08:00:00Z')
 // ---------------------------------------------------------------------------
 
 function makeFeishuServer(opts = {}) {
-  const state = { calls: [], auth: 0, records: new Map(), nextId: 1, failNext: null }
+  const state = {
+    calls: [], auth: 0, records: new Map(), nextId: 1, failNext: null,
+    // Columns the table already has. Empty = a table someone just created, which
+    // is exactly the case 「补全字段」 exists for.
+    fields: Array.isArray(opts.fields) ? [...opts.fields] : [],
+    nextFieldId: 1,
+  }
   const json = (payload) => ({ ok: true, status: 200, text: async () => JSON.stringify(payload) })
   const fetch = async (url, init) => {
     const pathname = url.replace(/^https?:\/\/[^/]+/, '')
@@ -59,6 +66,26 @@ function makeFeishuServer(opts = {}) {
       return json({ code: 0, msg: 'ok', tenant_access_token: 't-fake', expire: 7200 })
     }
     const all = () => [...state.records.entries()].map(([record_id, fields]) => ({ record_id, fields }))
+    if (init.method === 'GET' && pathname.includes('/fields?')) {
+      if (opts.fieldsFailure !== undefined) return json({ code: 1254005, msg: opts.fieldsFailure })
+      return json({
+        code: 0,
+        data: {
+          items: state.fields.map((name, i) => ({ field_id: `fld_${i}`, field_name: name, type: 1, is_primary: i === 0 })),
+          has_more: false,
+        },
+      })
+    }
+    if (init.method === 'POST' && pathname.endsWith('/fields')) {
+      // Feishu rejects a duplicate column name; the plugin must report that
+      // rather than retry under a different name.
+      if (state.fields.includes(body.field_name)) {
+        return json({ code: 1254006, msg: `field name ${body.field_name} already exists` })
+      }
+      state.fields.push(body.field_name)
+      const field = { field_id: `fld_new_${state.nextFieldId++}`, field_name: body.field_name, type: body.type }
+      return json({ code: 0, data: { field } })
+    }
     if (init.method === 'GET' && pathname.includes('/records?')) {
       if (opts.paginate === true) {
         const token = /page_token=(\d+)/.exec(pathname)
@@ -353,6 +380,57 @@ eq('a failed sync is remembered as failed', svc2.feishuStatus().lastSync.ok, fal
 ok('the remembered error is a string', typeof svc2.feishuStatus().lastSync.error === 'string')
 gate('feishuStatus after a failure is lossless JSON', svc2.feishuStatus())
 
+console.log('--- the service exposes the setup surface, not just the engine ---')
+// The engine tests above prove the four capabilities work. This proves the other
+// half -- the part a button actually calls: the enable-switch policy (setup and
+// diagnosis run before the switch, mirroring runs after it) and the wiring of
+// the injected transport through the service.
+const svcServer = makeFeishuServer({ fields: [] })
+const wired = new TodoService(null, () => {}, {
+  fetch: svcServer.fetch,
+  settingsFile: path.join(dir, 'wired-settings.json'),
+})
+wired.applySettings({
+  dataFile: path.join(dir, 'wired.json'),
+  feishu: { enabled: false, appId: 'a', appSecret: 'b', appToken: 'c', tableId: 'd' },
+})
+const wiredProbe = await wired.testFeishu()
+eq('the service tests the connection with the switch OFF', wiredProbe.ok, true)
+eq('the service token step ran', wiredProbe.tokenOk, true)
+eq('the service reports the empty table as missing every column', wiredProbe.columns.missing.length, requiredColumns('任务ID').length)
+gate('the service probe payload is lossless JSON', wiredProbe)
+
+const wiredFields = await wired.ensureFeishuFields({})
+eq('the service can complete the columns with the switch OFF', wiredFields.created.length, requiredColumns('任务ID').length)
+eq('and created nothing else', wiredFields.failed, [])
+
+// sync and pull stay behind the switch: one write direction has an off switch,
+// and it has to mean something.
+let wiredSync = null
+try { await wired.syncFeishu({}) } catch (e) { wiredSync = e }
+ok('the service refuses to sync while the switch is off',
+  wiredSync !== null && String(wiredSync.message).includes('未启用'), wiredSync?.message)
+let wiredPull = null
+try { await wired.pullFeishu({}) } catch (e) { wiredPull = e }
+ok('the service refuses to pull while the switch is off',
+  wiredPull !== null && String(wiredPull.message).includes('未启用'), wiredPull?.message)
+
+// Once the switch is on, the wiring itself is exercised end to end: read the
+// table, plan the holes, create them locally.
+seed(svcServer, [{ 任务ID: 't_wired', 标题: '从服务层补回来的任务' }])
+wired.updateSettings({ feishu: { enabled: true } })
+const callsBeforeReconcile = svcServer.state.calls.length
+const wiredReport = await wired.reconcileFeishu({})
+eq('the service reconciles with the switch on', wiredReport.remote, 1)
+eq('and sees the row as a hole', wiredReport.remoteOnly.map((r) => r.key), ['t_wired'])
+ok('reconcile writes nothing: every call it made was a read', svcServer.state.calls
+  .slice(callsBeforeReconcile)
+  .every((call) => call.method === 'GET' || call.pathname.includes('tenant_access_token')))
+const wiredPulled = await wired.pullFeishu({})
+eq('the service pulls the hole', wiredPulled.created, 1)
+ok('and the task now exists locally', wired.require().get('t_wired') !== null)
+gate('the service pull payload is lossless JSON', wiredPulled)
+
 console.log('--- auto-sync is opt-in and debounced ---')
 const autoServer = makeFeishuServer()
 const auto = new TodoService(null, () => {}, { fetch: autoServer.fetch, settingsFile: path.join(dir, 'auto-settings.json') })
@@ -371,6 +449,193 @@ eq('a mutation schedules a sync once autoSync is on', auto.feishuStatus().schedu
 auto.dispose()
 eq('disposing cancels the queued sync', auto.feishuStatus().scheduled, false)
 eq('disposing wrote nothing to the table', autoServer.state.calls.length, 0)
+
+// ---------------------------------------------------------------------------
+// the setup and diagnosis surface: test / fields / reconcile / pull
+//
+// These four exist because a bare table plus a wrong column name is the normal
+// first-run state: the connection has to be provable without writing, a fresh
+// table has to be given its columns, both sides have to be auditable, and the
+// rows only the table has have to be importable WITHOUT touching local work.
+// ---------------------------------------------------------------------------
+
+console.log('--- required columns ---')
+const wanted = requiredColumns('任务ID')
+eq('the key column comes first', wanted[0], '任务ID')
+ok('every writable column is required', Object.values(FEISHU_FIELDS).every((name) => wanted.includes(name)))
+eq('no column is listed twice', wanted.length, new Set(wanted).size)
+eq('a custom key column is not duplicated when it is also a column name',
+  requiredColumns(FEISHU_FIELDS.title).filter((name) => name === FEISHU_FIELDS.title).length, 1)
+eq('missingColumns reports what a fresh table lacks',
+  missingColumns([], '任务ID').length, wanted.length)
+eq('missingColumns reports nothing when the table is complete', missingColumns(wanted, '任务ID'), [])
+
+console.log('--- test connection: read-only, and it says where it failed ---')
+const probeServer = makeFeishuServer({ fields: ['标题'] })
+const probeSync = new FeishuSync({ ...FEISHU_DEFAULTS, appId: 'a', appSecret: 'b', appToken: 'c', tableId: 'd' },
+  null, { fetch: probeServer.fetch })
+const probe = await probeSync.probe()
+eq('a good connection tests ok', probe.ok, true)
+eq('the token step is reported', probe.tokenOk, true)
+eq('the table step is reported', probe.tableOk, true)
+ok('the columns the table does have are listed', probe.fields.includes('标题'))
+ok('the columns it lacks are listed', probe.columns.missing.includes('任务ID'))
+// A token exchange is a POST, so "read-only" has to be asserted against the
+// DATA endpoints -- which is the property that matters: a probe must not touch a
+// table that already holds rows.
+eq('a probe never writes to the table',
+  probeServer.state.calls.filter((call) => !call.pathname.includes('tenant_access_token'))
+    .every((call) => call.method === 'GET'),
+  true,
+  probeServer.state.calls.map((call) => `${call.method} ${call.pathname}`))
+eq('a probe never touches a record or field endpoint with a write',
+  probeServer.state.calls.filter((call) => /\/(records|fields)/.test(call.pathname) && call.method !== 'GET').length, 0)
+gate('the probe payload is lossless JSON', probe)
+
+const badProbe = new FeishuSync({ ...FEISHU_DEFAULTS, appId: 'a', appSecret: 'b', appToken: 'c', tableId: 'd' },
+  null, { fetch: makeFeishuServer({ badAuth: true }).fetch })
+const bad = await badProbe.probe()
+eq('bad credentials fail the probe', bad.ok, false)
+eq('and the failing step is named', bad.step, 'token')
+eq('and the failing step is known', bad.tokenOk, false)
+ok('and Feishu\'s own message is passed through', String(bad.error).includes('app_id'), bad.error)
+gate('a failed probe payload is lossless JSON', bad)
+
+const noTable = new FeishuSync({ ...FEISHU_DEFAULTS, appId: 'a', appSecret: 'b', appToken: 'c', tableId: 'd' },
+  null, { fetch: makeFeishuServer({ fieldsFailure: 'table not found' }).fetch })
+const missingTable = await noTable.probe()
+eq('an unreadable table fails at the schema step', missingTable.step, 'fields')
+ok('with Feishu\'s message', String(missingTable.error).includes('table not found'), missingTable.error)
+
+console.log('--- complete the columns of a fresh table ---')
+const freshServer = makeFeishuServer({ fields: [] })
+const freshSync = new FeishuSync({ ...FEISHU_DEFAULTS, appId: 'a', appSecret: 'b', appToken: 'c', tableId: 'd' },
+  null, { fetch: freshServer.fetch })
+const preview = await freshSync.ensureFields({ dryRun: true })
+eq('the preview names every missing column', preview.missing.length, wanted.length)
+eq('the preview creates nothing', freshServer.state.fields.length, 0)
+eq('and says it was a dry run', preview.dryRun, true)
+const filled = await freshSync.ensureFields({})
+eq('every missing column was created', filled.created.length, wanted.length)
+eq('nothing failed', filled.failed, [])
+eq('the key column is among them', freshServer.state.fields.includes('任务ID'), true)
+eq('every created column is 文本', freshServer.state.calls
+  .filter((call) => call.method === 'POST' && call.pathname.endsWith('/fields'))
+  .every((call) => call.body.type === COLUMN_TYPE_TEXT), true)
+const again = await freshSync.ensureFields({})
+eq('running it twice creates nothing', again.created, [])
+eq('and reports the table as complete', again.missing, [])
+gate('the completed-columns payload is lossless JSON', filled)
+
+const halfServer = makeFeishuServer({ fields: ['任务ID'] })
+const halfSync = new FeishuSync({ ...FEISHU_DEFAULTS, appId: 'a', appSecret: 'b', appToken: 'c', tableId: 'd' },
+  null, { fetch: halfServer.fetch })
+const half = await halfSync.ensureFields({})
+eq('an existing key column is not re-created', halfServer.state.fields.filter((n) => n === '任务ID').length, 1)
+eq('only the rest is added', half.created.length, wanted.length - 1)
+
+console.log('--- full reconciliation: both sides, including the rows a sync ignores ---')
+const recServer = makeFeishuServer({ fields: wanted })
+const recStore = new TodoStore({ dataFile: path.join(dir, 'rec.json') }).load()
+recStore.create({ id: 't_a', title: '一致的任务' })
+recStore.create({ id: 't_b', title: '本地独有' })
+recStore.flush()
+// Seeded with the row the plugin itself would write: a reconciliation that
+// called a correctly-synced row "different" would be worse than useless.
+seed(recServer, [
+  taskToFields(recStore.get('t_a'), recStore, { today: T }),
+  { 任务ID: 't_missing', 标题: '远端独有' },
+  { 标题: '别人手写的行' },
+])
+const recSync = new FeishuSync({ ...FEISHU_DEFAULTS, appId: 'a', appSecret: 'b', appToken: 'c', tableId: 'd', keyField: '任务ID' },
+  recStore, { fetch: recServer.fetch })
+const recReport = await recSync.reconcile({ today: T })
+eq('reconcile counts the local rows it wants', recReport.local, 2)
+eq('reconcile counts every remote row', recReport.remote, 3)
+eq('a row without the key column is not matched', recReport.unkeyed, 1)
+eq('the matched pair is reported as identical', recReport.identical, 1)
+eq('the differing set is empty here', recReport.differing, [])
+eq('a local-only task is listed', recReport.localOnly.map((r) => r.key), ['t_b'])
+eq('a remote-only row is listed', recReport.remoteOnly.map((r) => r.key), ['t_missing'])
+eq('the columns are reported as complete', recReport.columns.missing, [])
+gate('the reconciliation payload is lossless JSON', recReport)
+
+const driftServer = makeFeishuServer({ fields: wanted })
+seed(driftServer, [{ 任务ID: 't_a', 标题: '改过的标题' }])
+const driftSync = new FeishuSync({ ...FEISHU_DEFAULTS, appId: 'a', appSecret: 'b', appToken: 'c', tableId: 'd', keyField: '任务ID' },
+  recStore, { fetch: driftServer.fetch })
+const diffReport = await driftSync.reconcile({ today: T })
+eq('a changed field shows up as a difference', diffReport.differing.length, 1)
+eq('and the field is named', diffReport.differing[0].fields.includes('标题'), true)
+
+console.log('--- pull: import only what is missing locally ---')
+const pullStore = new TodoStore({ dataFile: path.join(dir, 'pull.json') }).load()
+pullStore.create({ id: 't_keep', title: '本地已有，标题不能被远端覆盖' })
+pullStore.flush()
+const pullServer = makeFeishuServer({ fields: wanted })
+seed(pullServer, [
+  { 任务ID: 't_keep', 标题: '远端的旧标题', 完成: '否' },
+  { 任务ID: 't_hole', 标题: '远端多出来的任务', 备注: '来自飞书', 清单: '工作', 优先级: '高',
+    标签: 'A, B', 截止时间: '2026-09-30', 完成: '是', 重复: '每周 周五' },
+  { 标题: '没有任务ID的行' },
+])
+const pullSync = new FeishuSync({ ...FEISHU_DEFAULTS, appId: 'a', appSecret: 'b', appToken: 'c', tableId: 'd', keyField: '任务ID' },
+  pullStore, { fetch: pullServer.fetch })
+const pullPreview = await pullSync.pull({ dryRun: true })
+eq('the preview plans exactly the holes', pullPreview.planned, 1)
+eq('and names the task', pullPreview.items.map((i) => i.title), ['远端多出来的任务'])
+eq('and counts the keyless row as skipped', pullPreview.skipped.length, 1)
+eq('a preview writes nothing locally', pullStore.get('t_hole'), null)
+ok('and says the 重复 column cannot be restored', pullPreview.notRestored.includes('重复'))
+eq('the local task was not touched by the preview', pullStore.get('t_keep').title, '本地已有，标题不能被远端覆盖')
+gate('the pull preview payload is lossless JSON', pullPreview)
+
+const pulled = await pullSync.pull({})
+eq('the pull created the hole', pulled.created, 1)
+const restored = pullStore.get('t_hole')
+eq('with the remote key as its id', restored.id, 't_hole')
+eq('with its title', restored.title, '远端多出来的任务')
+eq('with its note', restored.note, '来自飞书')
+eq('with its due date', restored.due, '2026-09-30')
+eq('with its tags', restored.tags, ['A', 'B'])
+eq('with its priority', restored.priority, 3)
+eq('with its completed state', restored.done, true)
+eq('the named list did not exist, so the pull created it', pulled.createdLists, ['工作'])
+eq('and it landed in that list', restored.listId, pullStore.listByname('工作')?.id ?? null)
+ok('and not in the inbox', restored.listId !== pullStore.listByname('收集箱')?.id, restored.listId)
+eq('the existing local task was NOT overwritten', pullStore.get('t_keep').title, '本地已有，标题不能被远端覆盖')
+const pulledAgain = await pullSync.pull({})
+eq('a second pull has nothing left to do', pulledAgain.created, 0)
+eq('and plans nothing', pulledAgain.holes, 0)
+
+console.log('--- pull refuses a table with no usable key column ---')
+const noKeyServer = makeFeishuServer({ fields: wanted })
+seed(noKeyServer, [{ 标题: '没有任务ID' }])
+const noKeyStore = new TodoStore({ dataFile: path.join(dir, 'pull2.json') }).load()
+noKeyStore.create({ id: 't_x', title: 'x' })
+noKeyStore.flush()
+const noKeySync = new FeishuSync({ ...FEISHU_DEFAULTS, appId: 'a', appSecret: 'b', appToken: 'c', tableId: 'd', keyField: '任务ID' },
+  noKeyStore, { fetch: noKeyServer.fetch })
+let pullRefusal = null
+try { await noKeySync.pull({}) } catch (e) { pullRefusal = e }
+ok('a pull refuses when no row carries the key column', pullRefusal !== null, pullRefusal?.message)
+ok('and the refusal explains why', String(pullRefusal?.message).includes('任务ID'), pullRefusal?.message)
+
+console.log('--- the remote-to-local mapping, in isolation ---')
+const mapped = remoteRowToTask({
+  标题: '映射', 备注: 'n', 完成: '是', 清单: '工作', 优先级: '中', 标签: 'x, y',
+  截止时间: '2026-09-30', 开始时间: '2026-09-28', 父任务: '父任务标题', 创建时间: '2026-09-01T00:00:00.000Z',
+  重复: '每周 周五', 状态: '已完成', 逾期: '否', 子任务进度: '1/2',
+}, '任务ID', (title) => (title === '父任务标题' ? 't_parent' : null))
+eq('the mapping reads the title', mapped.input.title, '映射')
+eq('the mapping reads the parent link', mapped.input.parentId, 't_parent')
+eq('the mapping keeps the creation stamp', mapped.input.createdAt, '2026-09-01T00:00:00.000Z')
+eq('the mapping reads 中 as priority 2', mapped.input.priority, 2)
+eq('a derived column is not restored', Object.keys(mapped.input).includes('状态'), false)
+eq('the natural-language recurrence is reported, not guessed', mapped.notRestored, ['重复'])
+const unlinked = remoteRowToTask({ 标题: 'x', 父任务: '找不到的父' }, '任务ID', () => null)
+eq('an unresolvable parent is reported', unlinked.unlinkedParent, '找不到的父')
+eq('and no parentId is invented', Object.keys(unlinked.input).includes('parentId'), false)
 
 fs.rmSync(dir, { recursive: true, force: true })
 console.log('\n' + (fail ? `FAILING: ${fail} of ${pass + fail}` : `FEISHU GATE: ALL PASS (${pass})`))
