@@ -182,20 +182,27 @@ const declarations = aliasBlock.split(';')
 const mapped = declarations.filter((d) => /--td-[\w-]+\s*:/.test(d) && d.includes('var(--dsw-alias-')).length
 ok('the token map is declared once, on the seat marker', aliased.has('td-seat') && aliased.size === 1, [...aliased])
 ok('the aliases resolve to host tokens', mapped >= 10, mapped)
-// Literal colours are the listed exceptions: semantic priority/status hues,
-// the floating window's cream skin and its two ink tones, plus the fixed gallery
-// blue and its white on-colour. Those hues cannot be derived from the host's
-// greyscale theme, so each is declared once in the alias block; every other
-// colour must come through the host token map.
+// Literal colours are the listed exceptions: semantic priority/status hues and
+// the small smart-filter palette, the floating window's cream skin and its two
+// ink tones, plus the fixed gallery blue and its white on-colour. Those hues
+// cannot be derived from the host's greyscale theme, so each is declared once in
+// the alias block; every other colour must come through the host token map.
 // White is not the foreground for the host's theme-dependent brand fill (which
 // flips to white in dark mode); it is only the label on the fixed gallery-blue
 // accent, declared once as --td-accent-on. That keeps the two contrast roles
 // separate instead of letting a white label disappear on a white brand fill.
 const cssRules = css.replace(/\/\*[\s\S]*?\*\//g, ' ')
+const SMART_ACCENTS = [
+  ['today', 'td-accent'], ['all', 'td-accent'], ['week', 'td-teal'],
+  ['overdue', 'td-danger'], ['inbox', 'td-violet'], ['done', 'td-ok'],
+]
+ok('smart-list accents are mapped by meaning', SMART_ACCENTS.every(([filter, token]) =>
+  new RegExp(`\\[data-smart-filter="${filter}"\\][^{}]*\\{--td-smart-accent:var\\(--${token}\\)\\}`).test(cssRules)),
+SMART_ACCENTS)
 ok('the gallery-blue on-colour is mapped once and not hard-coded on controls',
   /--td-accent-on\s*:\s*#fff\b/.test(aliasBlock) && !/color\s*:\s*#fff\b/.test(cssRules))
 const LITERAL_COLOURS = new Set([
-  '#8b97a6', '#e0a53c', '#1f9d61', '#e56d24',
+  '#8b97a6', '#e0a53c', '#1f9d61', '#e56d24', '#22a89a', '#7c5cf0',
   // 奶白 + 蓝: the floating window's cream pair, plus the two ink tones that keep
   // a light card readable under the dark theme. And the gallery blue -- since v5
   // the WHOLE plugin's accent (primary / selection / focus), declared once in
@@ -492,17 +499,21 @@ ok('no seat root re-declares the map, the box model or the focus ring',
 //    just as quietly as one that is declared in an unreachable place.
 //
 // Two names are per-ELEMENT values the JSX writes inline rather than theme tokens:
-// the row's staggered entrance delay and the column's list colour. They are kept as
-// an explicit whitelist whose writers are asserted to exist, so this stays a net
-// for orphans instead of a hole in it.
-const LOCAL_TOKENS = ['--td-delay', '--td-tint']
-const inlineWriters = LOCAL_TOKENS.filter((name) => jsx.includes("'" + name + "'"))
-ok('the per-element tokens are really set inline by the JSX',
-  inlineWriters.length === LOCAL_TOKENS.length, LOCAL_TOKENS.filter((n) => !inlineWriters.includes(n)))
+// the row's staggered entrance delay and the column's list colour. The smart accent
+// is local too, but is resolved by the data-filter selector map rather than inline.
+// Keep those cases explicit and assert the writers, so this remains a net for orphans.
+const INLINE_TOKENS = ['--td-delay', '--td-tint']
+const CSS_LOCAL_TOKENS = ['--td-smart-accent']
+const LOCAL_TOKENS = [...INLINE_TOKENS, ...CSS_LOCAL_TOKENS]
+const inlineWriters = INLINE_TOKENS.filter((name) => jsx.includes("'" + name + "'"))
+ok('the inline per-element tokens are really set by the JSX',
+  inlineWriters.length === INLINE_TOKENS.length, INLINE_TOKENS.filter((n) => !inlineWriters.includes(n)))
+ok('the smart accent is assigned by the data-filter rules',
+  CSS_LOCAL_TOKENS.every((name) => cssRules.includes(name)))
 const declaredNames = new Set([...aliasBlock.matchAll(/--td-[\w-]+/g)].map((m) => m[0]))
 const consumed = new Set([...css.replace(/\/\*[\s\S]*?\*\//g, ' ').matchAll(/var\((--td-[\w-]+)/g)].map((m) => m[1]))
 const orphans = [...consumed].filter((name) => !declaredNames.has(name) && !LOCAL_TOKENS.includes(name)).sort()
-ok('every consumed token is either mapped or an inline per-element value', orphans.length === 0, orphans)
+ok('every consumed token is mapped or has a local writer', orphans.length === 0, orphans)
 
 // 5. the two global layers keep a real surface: a mask, a card, a radius, a shadow.
 ok('the capture layer paints a mask, a card, a radius and a shadow',

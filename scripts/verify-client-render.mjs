@@ -770,6 +770,17 @@ ok('the empty state explains the rapid-add syntax', ui.text().includes('在下�
 ok('the overlay seat renders nothing while idle', overlay.byClass('td-modal').length === 0)
 ok('the smart-list rail is present',
   ui.byClass('td-side').length >= 6, ui.byClass('td-side').length)
+const smartRailKeys = ui.byClass('td-side')
+  .filter((node) => typeof node.props['data-smart-filter'] === 'string')
+  .map((node) => node.props['data-smart-filter'])
+ok('the rail exposes all six semantic filters to the stylesheet',
+  ['today', 'week', 'overdue', 'inbox', 'all', 'done'].every((key) => smartRailKeys.includes(key)),
+  smartRailKeys)
+const compactFilterKeys = ui.byClass('td-head2-tab')
+  .map((node) => node.props['data-smart-filter'])
+ok('the compact header shares the semantic filter keys',
+  ['today', 'week', 'overdue', 'inbox', 'all', 'done'].every((key) => compactFilterKeys.includes(key)),
+  compactFilterKeys)
 for (const label of ['今天', '最近 7 天', '已逾期', '未安排', '全部任务', '已完成']) {
   ok(`the rail offers ${label}`, ui.text().includes(label))
 }
@@ -1124,6 +1135,20 @@ ok('the gantt window shifts', beforeAnchor !== afterAnchor, { beforeAnchor, afte
 ui.byClass('td-cal-navb').find((n) => ui.text(n).includes('回到今天')).props.onClick({})
 await ui.settle()
 ok('the gantt returns to today', ui.text().includes(`${today} →`) || ui.text().includes(`-`) )
+const ganttDays = ui.byClass('td-gantt-cell').length
+const ganttWidth = 44
+const ganttHeader = ui.byClass('td-gantt-hd')[0]
+const ganttTracks = ui.byClass('td-gantt-track')
+ok('gantt header and tracks share one 44px-per-day grid',
+  ganttHeader?.props.style.gridTemplateColumns === `repeat(${ganttDays}, ${ganttWidth}px)`
+  && ganttHeader?.props.style.minWidth === ganttDays * ganttWidth
+  && ganttTracks.every((node) => node.props.style.gridTemplateColumns === `repeat(${ganttDays}, ${ganttWidth}px)`
+    && node.props.style.minWidth === ganttDays * ganttWidth),
+  { ganttDays, header: ganttHeader?.props.style, track: ganttTracks[0]?.props.style })
+const todayLine = ui.byClass('td-gantt-now')[0]
+ok('the gantt today line sits at the center of its date column',
+  todayLine !== undefined && (todayLine.props.style.left + 1) % ganttWidth === ganttWidth / 2,
+  todayLine?.props.style.left)
 
 // ===========================================================================
 section('fullscreen is a second host sharing one store')
@@ -2030,6 +2055,10 @@ section('visual system v2 (computed, not rendered)')
     .map((decl) => /^\s*([a-z-]+)\s*:\s*([\s\S]+)$/.exec(decl))
     .filter((m) => m !== null && m[1] === prop)
     .map((m) => m[2].trim())
+  const declaration = (selector, prop) => {
+    const rule = parsed.find((entry) => entry.sel.trim() === selector)
+    return rule === undefined ? null : declsOf(rule, prop)[0] ?? null
+  }
 
   // --- V1/V2: the scale ladders -------------------------------------------
   const FONT = new Set(['10.5px', '12.5px', '14px', '16px', '20px'])
@@ -2065,6 +2094,20 @@ section('visual system v2 (computed, not rendered)')
   ok('V2 margin uses the ten-step ladder only', ladder('margin', SPACE).length === 0, ladder('margin', SPACE).slice(0, 12))
   ok('the ladder check skipped only non-step values, and reports how many',
     typeof skipped === 'number' && skipped < 200, skipped)
+  const CONTROL_SIZES = [
+    ['.td-btn', 'min-height', '36px'], ['.td-btn.sm', 'min-height', '32px'],
+    ['.td-icon', 'width', '32px'], ['.td-icon', 'height', '32px'],
+    ['.td-countbadge', 'height', '22px'], ['.td-side', 'min-height', '36px'],
+    ['.td-row', 'min-height', '48px'], ['.td-chk', 'width', '22px'], ['.td-chk', 'height', '22px'],
+    ['.td-qadd .td-in', 'height', '40px'], ['.td-send', 'width', '40px'], ['.td-send', 'height', '40px'],
+  ]
+  const sizeDrift = CONTROL_SIZES.filter(([selector, prop, expected]) => declaration(selector, prop) !== expected)
+  ok('primary controls follow a consistent size rhythm', sizeDrift.length === 0, sizeDrift)
+  const ganttLabelHeight = declaration('.td-gantt-row', 'height')
+  const ganttTrackHeight = declaration('.td-gantt-track', 'height')
+  ok('gantt labels and timeline tracks share the 48px row rhythm',
+    ganttLabelHeight === '48px' && ganttTrackHeight === ganttLabelHeight,
+    { ganttLabelHeight, ganttTrackHeight })
 
   // --- V3: the surface ladder and ink contrast, computed -------------------
   // The host tokens come from the installed theme when it can be found (the
@@ -2154,9 +2197,12 @@ section('visual system v2 (computed, not rendered)')
   const tokensFor = (mode) => {
     const source = hostTokens === null ? FALLBACK_TOKENS[mode] : hostTokens[mode]
     const map = { ...source }
+    const lightStart = rules.indexOf('.td-seat{')
+    const lightEnd = lightStart < 0 ? -1 : rules.indexOf('}', lightStart)
+    const darkStart = rules.indexOf('body[data-ds-dark-theme]')
     const block = mode === 'light'
-      ? rules.slice(rules.indexOf('.td-root,.td-modal-layer{'), rules.indexOf('.td-root{height:100%'))
-      : rules.slice(rules.indexOf('body[data-ds-dark-theme]'), rules.indexOf('body[data-ds-dark-theme]') + 1200)
+      ? lightStart < 0 || lightEnd < 0 ? '' : rules.slice(lightStart, lightEnd)
+      : darkStart < 0 ? '' : rules.slice(darkStart, darkStart + 1200)
     for (const decl of block.split(';')) {
       const m = /--(td-[\w-]+)\s*:\s*([^;}]+)/.exec(decl)
       if (m !== null) map[m[1]] = m[2].trim()
