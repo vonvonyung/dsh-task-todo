@@ -656,6 +656,56 @@ ok('React was obtained through require', requireCalls.includes('react'), require
 ok('nothing else was required', requireCalls.every((id) => id === 'react'), requireCalls)
 
 
+// The settings page's report text, asserted directly on the builders.
+//
+// A reported bug: clicking 立即同步 printed "本地 undefined 行 / 远端 undefined 行",
+// because the page read a wrapper object the host no longer returned. The host
+// contract is asserted in the Feishu gate; this is the other half -- the RENDERED
+// text must never contain the word `undefined` for a well-formed payload.
+{
+  const builders = plugin.__internals
+  ok('the report builders are exposed for the gate',
+    typeof builders?.syncLines === 'function' && typeof builders?.probeLines === 'function',
+    Object.keys(builders ?? {}))
+
+  const syncText = builders.syncLines({
+    local: 2, remote: 4, unchanged: 2, unmanaged: 2, prune: false,
+    planned: { created: 0, updated: 0, deleted: 0 }, created: 0, updated: 0, deleted: 0,
+    dryRun: false, keyField: '任务ID',
+  }).join(' / ')
+  ok('the sync report carries real counts', syncText.includes('本地 2 行') && syncText.includes('远端 4 行'), syncText)
+  ok('the sync report never says undefined', !syncText.includes('undefined'), syncText)
+  ok('and it explains the rows it left alone', syncText.includes('不属于本工作区'), syncText)
+
+  const probeText = builders.probeLines({
+    ok: true, tokenOk: true, tableOk: true, baseUrl: 'https://open.feishu.cn',
+    appToken: 'bascn', tableId: 'tbl', keyField: '任务ID', remote: 4, keyed: 2,
+    columns: { present: ['任务ID'], missing: ['备注'] },
+  }).join(' / ')
+  ok('the probe report never says undefined', !probeText.includes('undefined'), probeText)
+  ok('and it names the missing column', probeText.includes('备注'), probeText)
+
+  const reconcileText = builders.reconcileLines({
+    local: 2, remote: 4, keyed: 4, unkeyed: 0, identical: 1,
+    differing: [{ key: 't_a', title: 'A', fields: ['标题'] }],
+    localOnly: [{ key: 't_b', title: 'B' }], remoteOnly: [{ key: 't_c', title: 'C' }],
+    columns: { present: [], missing: [] }, keyField: '任务ID',
+  }).join(' / ')
+  ok('the reconcile report never says undefined', !reconcileText.includes('undefined'), reconcileText)
+  ok('and it points at the pull for remote-only rows', reconcileText.includes('从飞书补洞'), reconcileText)
+
+  const pullText = builders.pullLines({
+    dryRun: true, planned: 1, created: 0, remote: 4, holes: 1,
+    items: [{ key: 't_c', title: 'C' }], skipped: [], notRestored: ['重复'],
+    unlinkedParents: [], createdLists: [], keyField: '任务ID',
+  }).join(' / ')
+  ok('the pull report never says undefined', !pullText.includes('undefined'), pullText)
+  ok('and it repeats the additive promise', pullText.includes('不覆盖'), pullText)
+
+  const fieldText = builders.fieldLines({ missing: [], existing: ['任务ID'], created: [], failed: [], dryRun: false }).join(' / ')
+  ok('the column report never says undefined', !fieldText.includes('undefined'), fieldText)
+}
+
 const seat = (key) => registrations.find((r) => r.key === key)
 eq('four seats were registered, one per slot',
   registrations.map((r) => r.key).sort(),

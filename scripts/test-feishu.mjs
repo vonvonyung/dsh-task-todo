@@ -208,21 +208,35 @@ const plan = diffSync({
 eq('an identical row is unchanged', plan.unchanged, 1)
 eq('a missing row is created', plan.creates, [{ 任务ID: 't_c', 标题: '新的' }])
 eq('a changed row updates only the changed fields', plan.updates, [{ recordId: 'r2', fields: { 标题: '新标题' } }])
-eq('a vanished row is deleted', plan.deletes, [])
+eq('nothing is deleted by default', plan.deletes, [])
 eq('keyedRemoteCount counts only our rows', keyedRemoteCount(remote, '任务ID'), 2)
-const pruned = diffSync({
-  rows: [{ key: 't_a', fields: { 任务ID: 't_a' } }],
-  remote,
-  keyField: '任务ID',
-})
-eq('a removed task deletes its row', pruned.deletes, ['r2'])
-eq('a foreign row is never deleted', pruned.deletes.includes('r3'), false)
-eq('prune=false keeps vanished rows', diffSync({
-  rows: [{ key: 't_a', fields: { 任务ID: 't_a' } }],
-  remote,
-  keyField: '任务ID',
-  prune: false,
-}).deletes, [])
+
+// Deletion needs BOTH the switch and a tombstone. "A remote row whose key is not
+// a local task" is not evidence of anything -- it is also the exact shape of a
+// row another machine or another person put there.
+const gone = [{ key: 't_a', fields: { 任务ID: 't_a' } }]
+eq('a vanished row is not deleted without the switch',
+  diffSync({ rows: gone, remote, keyField: '任务ID', prune: false, tombstones: ['t_b'] }).deletes, [])
+eq('a vanished row is not deleted without a tombstone',
+  diffSync({ rows: gone, remote, keyField: '任务ID', prune: true, tombstones: [] }).deletes, [])
+eq('a vanished row IS deleted with both',
+  diffSync({ rows: gone, remote, keyField: '任务ID', prune: true, tombstones: ['t_b'] }).deletes, ['r2'])
+eq('and the key is reported so the tombstone can be retired',
+  diffSync({ rows: gone, remote, keyField: '任务ID', prune: true, tombstones: ['t_b'] }).deletedKeys, ['t_b'])
+eq('a foreign row is never deleted, even with the switch on',
+  diffSync({ rows: gone, remote, keyField: '任务ID', prune: true, tombstones: ['t_b'] }).deletes.includes('r3'), false)
+// A keyed row we do not own is the interesting case: it cannot be deleted, and
+// the report has to say it was left alone.
+eq('a foreign KEYED row is counted for the report',
+  diffSync({
+    rows: gone,
+    remote: [...remote, { recordId: 'r4', fields: { 任务ID: 't_other', 标题: '别人的任务' } }],
+    keyField: '任务ID',
+    prune: true,
+    tombstones: ['t_b'],
+  }).unmanaged, 1)
+eq('a keyless row is never counted as unmanaged either',
+  diffSync({ rows: gone, remote, keyField: '任务ID', prune: true, tombstones: ['t_b'] }).unmanaged, 0)
 // Bitable may hand back a text cell as segments; that must not read as a change.
 eq('a segment-array cell still compares equal',
   diffSync({
@@ -308,10 +322,23 @@ const remoteA = [...syncServer.state.records.values()].find((f) => f['任务ID']
 eq('the remote status now reads 已完成', remoteA['状态'], '已完成')
 eq('the remote 完成 column now reads 是', remoteA['完成'], '是')
 
-console.log('--- deletions, dry runs and the key guard ---')
+console.log('--- deletions are opt-in AND tombstone-gated ---')
 syncStore.remove(b.id)
-const fourth = await sync.run({ today: T })
-eq('deleting a task deletes its row', [fourth.created, fourth.updated, fourth.deleted], [0, 0, 1])
+// Default is OFF, so the same removal now deletes nothing from the table.
+const withoutOptIn = await sync.run({ today: T })
+eq('a local delete does NOT touch the table by default',
+  [withoutOptIn.created, withoutOptIn.updated, withoutOptIn.deleted], [0, 0, 0])
+ok('and the row is still there',
+  [...syncServer.state.records.values()].some((f) => f['任务ID'] === b.id))
+ok('and the run says the row is not managed', withoutOptIn.unmanaged >= 1, withoutOptIn.unmanaged)
+
+// Opted in: the row goes, because the store recorded the deletion on purpose.
+const pruneSync = new FeishuSync({ ...config, deleteRemoved: true }, syncStore, {
+  fetch: syncServer.fetch, now: fixedNow,
+})
+const fourth = await pruneSync.run({ today: T })
+eq('with the switch on, a tombstoned row is deleted',
+  [fourth.created, fourth.updated, fourth.deleted], [0, 0, 1])
 ok('the deleted row is gone from the table',
   [...syncServer.state.records.values()].every((f) => f['任务ID'] !== b.id))
 
@@ -360,7 +387,11 @@ gate('feishuStatus is lossless JSON', initial)
 const svcStore = svc.require()
 svcStore.create({ title: '服务层任务', due: '2026-09-20' })
 const result = await svc.syncFeishu({ today: T })
-eq('the service syncs through the injected transport', result.summary.created, 1)
+// The service returns the summary DIRECTLY, like its four sibling actions. It
+// used to be the one action wrapped in `{ ok, summary }`, and the settings page
+// read the wrapper -- which rendered "本地 undefined 行 / 远端 undefined 行".
+eq('the service returns the sync summary directly', typeof result.local, 'number')
+eq('the service syncs through the injected transport', result.created, 1)
 const after = svc.feishuStatus()
 eq('status remembers the last sync', after.lastSync.ok, true)
 eq('status records what the last sync did', after.lastSync.summary.created, 1)
@@ -458,6 +489,64 @@ eq('disposing wrote nothing to the table', autoServer.state.calls.length, 0)
 // table has to be given its columns, both sides have to be auditable, and the
 // rows only the table has have to be importable WITHOUT touching local work.
 // ---------------------------------------------------------------------------
+
+console.log('--- a sync must never delete rows it does not own (reported bug) ---')
+// The reported failure: local A,B; the table has A,B,C,D; clicking 立即同步 left
+// the table with only A,B. The old delete rule was "a remote row whose key is not
+// a local task" -- which is also the exact definition of somebody else's row.
+{
+  const store = new TodoStore({ dataFile: path.join(dir, 'own.json'), saveDelay: 5 }).load()
+  store.create({ id: 't_A', title: 'A' })
+  store.create({ id: 't_B', title: 'B' })
+  store.flush()
+  const rows = store.all().map((t) => ({ key: t.id, fields: taskToFields(t, store, { today: T }) }))
+  const foreign = [
+    ...rows.map((r, i) => ({ record_id: `r_${i}`, fields: r.fields })),
+    { record_id: 'r_C', fields: { 任务ID: 't_C', 标题: 'C' } },
+    { record_id: 'r_D', fields: { 任务ID: 't_D', 标题: 'D' } },
+  ]
+  const plan = diffSync({ rows, remote: foreign, keyField: '任务ID', prune: true, tombstones: [] })
+  eq('no row is planned for deletion', plan.deletes, [])
+  eq('both untouched rows are counted as unmanaged', plan.unmanaged, 2)
+  eq('and the owned rows still match', plan.unchanged, 2)
+
+  // ...and the end-to-end run, with deletion explicitly switched ON, keeps them.
+  const server = makeFeishuServer()
+  for (const rec of foreign) server.state.records.set(rec.record_id, rec.fields)
+  const sync = new FeishuSync({ ...config, deleteRemoved: true }, store, { fetch: server.fetch, now: fixedNow })
+  const summary = await sync.run({ today: T })
+  eq('a full sync deletes nothing', summary.deleted, 0)
+  eq('and reports the foreign rows as unmanaged', summary.unmanaged, 2)
+  ok('C and D are still in the table',
+    [...server.state.records.values()].some((f) => f['任务ID'] === 't_C')
+    && [...server.state.records.values()].some((f) => f['任务ID'] === 't_D'))
+
+  // A task the workspace really did delete is still removable -- by tombstone.
+  store.remove('t_B')
+  const half = new FeishuSync({ ...config, deleteRemoved: false }, store, { fetch: server.fetch, now: fixedNow })
+  const offSummary = await half.run({ today: T })
+  eq('even a tombstoned row survives while the switch is off', offSummary.deleted, 0)
+  const onSync = new FeishuSync({ ...config, deleteRemoved: true }, store, { fetch: server.fetch, now: fixedNow })
+  const onSummary = await onSync.run({ today: T })
+  eq('and is deleted once the switch is on', onSummary.deleted, 1)
+  ok('only that row went',
+    [...server.state.records.values()].some((f) => f['任务ID'] === 't_A')
+    && [...server.state.records.values()].some((f) => f['任务ID'] === 't_C')
+    && ![...server.state.records.values()].some((f) => f['任务ID'] === 't_B'))
+  eq('the tombstone is cleared once the row is gone', store.tombstones(), [])
+  const again = await onSync.run({ today: T })
+  eq('and the next sync is a no-op', [again.created, again.updated, again.deleted], [0, 0, 0])
+}
+// A task restored from the table must not be deleted by the next sync: the pull
+// reuses the row's key as the local id, so the tombstone has to be dropped.
+{
+  const store = new TodoStore({ dataFile: path.join(dir, 'restore.json'), saveDelay: 5 }).load()
+  store.create({ id: 't_X', title: 'X' })
+  store.remove('t_X')
+  eq('the deletion left a tombstone', store.tombstones(), ['t_X'])
+  store.create({ id: 't_X', title: 'X（从飞书补回来）' })
+  eq('re-creating the id clears it', store.tombstones(), [])
+}
 
 console.log('--- required columns ---')
 const wanted = requiredColumns('任务ID')
