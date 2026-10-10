@@ -182,27 +182,28 @@ const declarations = aliasBlock.split(';')
 const mapped = declarations.filter((d) => /--td-[\w-]+\s*:/.test(d) && d.includes('var(--dsw-alias-')).length
 ok('the token map is declared once, on the seat marker', aliased.has('td-seat') && aliased.size === 1, [...aliased])
 ok('the aliases resolve to host tokens', mapped >= 10, mapped)
-
-// Literal colours are the listed exceptions: two priority hues, the success green
-// and the warm accent have no host token (a semantic HUE cannot be derived from a
-// greyscale theme), the shadows are black at low alpha (rgba, so they are not hex
-// at all), and everything else must come through the alias map. Each of them is
-// declared exactly once, in the alias block, and is only ever used *mixed into a
-// surface*, which is what keeps it legible in both themes.
-// White used to be on this list as "the foreground on a brand fill" -- which is
-// exactly wrong in the dark theme, where the brand fill IS white and the label
-// vanished. The contrast token is --td-card / --dsw-alias-bg-base instead.
+// Literal colours are the listed exceptions: semantic priority/status hues,
+// the floating window's cream skin and its two ink tones, plus the fixed gallery
+// blue and its white on-colour. Those hues cannot be derived from the host's
+// greyscale theme, so each is declared once in the alias block; every other
+// colour must come through the host token map.
+// White is not the foreground for the host's theme-dependent brand fill (which
+// flips to white in dark mode); it is only the label on the fixed gallery-blue
+// accent, declared once as --td-accent-on. That keeps the two contrast roles
+// separate instead of letting a white label disappear on a white brand fill.
 const cssRules = css.replace(/\/\*[\s\S]*?\*\//g, ' ')
+ok('the gallery-blue on-colour is mapped once and not hard-coded on controls',
+  /--td-accent-on\s*:\s*#fff\b/.test(aliasBlock) && !/color\s*:\s*#fff\b/.test(cssRules))
 const LITERAL_COLOURS = new Set([
   '#8b97a6', '#e0a53c', '#1f9d61', '#e56d24',
   // 奶白 + 蓝: the floating window's cream pair, plus the two ink tones that keep
   // a light card readable under the dark theme. And the gallery blue -- since v5
   // the WHOLE plugin's accent (primary / selection / focus), declared once in
   // the alias block as --td-accent and shared with the floating window's skin,
-  // which is what makes the window read as a piece of the plugin. Same rule as
-  // the hues above -- declared once, and only ever used as a surface or mixed
-  // into one.
-  '#fffaf1', '#f6eedd', '#3b82f6', '#16233a', '#4d6076',
+  // which is what makes the window read as a piece of the plugin. The cream and
+  // ink values are surfaces / mixed into surfaces; the white --td-accent-on is
+  // reserved for the fixed blue fill, never the theme-dependent host brand.
+  '#fffaf1', '#f6eedd', '#3b82f6', '#fff', '#16233a', '#4d6076',
 ])
 const literals = [...new Set((cssRules.match(/#[0-9a-fA-F]{3,8}\b/g) ?? []).map((c) => c.toLowerCase()))]
 const stray = literals.filter((c) => !LITERAL_COLOURS.has(c)).sort()
