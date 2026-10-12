@@ -169,10 +169,10 @@ class Cdp {
   }
 
   async shot(file) {
-    // The host auto-focuses the inline quick-add input when its panel mounts and
-    // again on view transitions. Keep the page state intact, but remove that
-    // incidental focus ring from screenshots (the input text and previews remain).
-    await this.eval(`(function () { var input = document.querySelector('.td-qadd .td-in'); if (input && document.activeElement === input) input.blur(); return true })()`)
+    // The host auto-focuses the inline quick-add input in either seat. Use the
+    // active element rather than the first matching input so a floating-window
+    // screenshot blurs its own control, not the hidden panel's. Keep its value.
+    await this.eval(`(function () { var input = document.activeElement; if (input && input.matches && input.matches('.td-qadd .td-in')) input.blur(); return true })()`)
 
     const result = await this.send('Page.captureScreenshot', { format: 'png', captureBeyondViewport: false })
     fs.writeFileSync(file, Buffer.from(result.data, 'base64'))
@@ -444,6 +444,8 @@ window.__shot = {
 const RECIPE = [
   { name: '00-dismiss', js: `__shot.dismiss()`, wait: 400 },
   { name: '01-panel-list', js: `(function () { var result = __shot.clickText('待办任务'); setTimeout(function () { if (document.activeElement?.blur) document.activeElement.blur() }, 1200); return result })()`, wait: 7000 },
+  { name: '01a-floating-window', js: `__shot.clickSel('[aria-label="打开浮动小窗口"]')`, wait: 1200 },
+  { name: '01b-floating-window-docked', js: `__shot.clickSel('[aria-label="停靠回侧边栏面板"]')`, wait: 800 },
   { name: '02-full-list', js: `__shot.clickText('全屏')`, wait: 900 },
   { name: '03-full-board', js: `__shot.clickText('看板')`, wait: 900 },
   { name: '04-full-calendar', js: `__shot.clickText('日历')`, wait: 900 },

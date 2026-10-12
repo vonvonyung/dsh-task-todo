@@ -1816,9 +1816,15 @@ eq('Escape closes the palette', overlay.byClass('td-cmdk').length, 0)
 ok('the board is still the view after the palette closed', ui.byClass('td-col').length >= 1)
 
 // C5, across SEATS: the floating window is a different seat with its own subtree,
-// and its box shows what the panel was holding. This is the bug the store draft
-// fixes: the window used to open empty while a half-written sentence sat in the
-// panel behind it.
+// follows the saved appearance, and shows what the panel was holding. The two
+// window actions use line icons so a font fallback cannot change their meaning.
+const floatAction = ui.tag('button').find((node) => node.props['aria-label'] === '打开浮动小窗口')
+const floatGlyph = floatAction?.children.find((node) => node.tag === 'svg' && node.props.className === 'td-glyph')
+ok('the floating action has a dedicated pop-out SVG icon', floatGlyph !== undefined)
+eq('the floating action uses the outward-window path',
+  floatGlyph?.children[0]?.props.d,
+  'M9.1 3h4v4M13 3.1 7.7 8.4M10.2 8.2v3.6a1 1 0 0 1-1 1H4.1a1 1 0 0 1-1-1V5.2a1 1 0 0 1 1-1h3.2')
+eq('the floating action keeps its text label', ui.text(floatAction), '浮动')
 captureInput().props.onChange({ target: { value: '跨宿主草稿' } })
 await ui.settle(2)
 await openPalette()
@@ -1827,9 +1833,22 @@ await overlay.settle(2)
 overlay.byClass('td-cmdk-in')[0].props.onKeyDown(keyEvent('Enter', overlay.byClass('td-cmdk-in')[0]))
 await overlay.settle(3)
 const floatBar = overlay.byClass('td-qadd-float')[0]
+const floatFrame = overlay.byClass('td-float')[0]
+const floatInterior = overlay.byClass('td-floatapp')[0]
 ok('the floating window is its own seat with its own bar', floatBar !== undefined,
   overlay.byClass('td-qadd-float').length)
-eq('and its box shows the draft typed in the panel',
+eq('the floating frame follows the saved flat appearance',
+  floatFrame?.props['data-todo-appearance'], 'flat')
+eq('the floating app interior follows the saved flat appearance',
+  floatInterior?.props['data-todo-appearance'], 'flat')
+const dockAction = overlay.tag('button').find((node) => node.props['aria-label'] === '停靠回侧边栏面板')
+const dockGlyph = dockAction?.children.find((node) => node.tag === 'svg' && node.props.className === 'td-glyph')
+ok('the active window uses a dedicated dock SVG icon', dockGlyph !== undefined)
+eq('the dock action uses the panel-inward path',
+  dockGlyph?.children[0]?.props.d,
+  'M2.6 3.2h10.8v9.6H2.6zM5.5 3.2v9.6M12 8H7.8M9.7 6.1 7.8 8l1.9 1.9')
+eq('the dock control no longer uses a text arrow', overlay.text(dockAction), '')
+eq('the floating box shows the draft typed in the panel',
   floatBar?.children.find((n) => n.tag === 'input')?.props.value, '跨宿主草稿')
 document.key(null, { key: 'Escape' })
 await overlay.settle(2)
@@ -2428,7 +2447,7 @@ section('visual system v2 (computed, not rendered)')
     /\.td-col\{[^}]*background:var\(--td-card\)/.test(rules)
     && /\.td-card\{[^}]*background:var\(--td-soft\)/.test(rules))
 
-  // --- V4: ink-3 stays off the canvas; the float guard exists --------------
+  // --- V4: ink-3 stays off the canvas; float shares the theme map -----------
   const bodyOf = (selector) => {
     const at = rules.indexOf(selector + '{')
     return at < 0 ? null : rules.slice(at + selector.length + 1, rules.indexOf('}', at))
@@ -2438,21 +2457,28 @@ section('visual system v2 (computed, not rendered)')
     ok(`V4 ${selector} takes ink-2 where it lands on the canvas`,
       body !== null && /color:var\(--td-text-2\)/.test(body), body)
   }
-  ok('V4 the dark override guards the floating window',
-    /body\[data-ds-dark-theme\]\s+\.td-root:not\(\.td-floatapp\)/.test(rules))
+  ok('V4 the dark override reaches the floating frame and interior through the seat marker',
+    /body\[data-ds-dark-theme\]\s+\.td-seat\{[^}]*--td-canvas:/.test(rules))
   ok('V4 the dark override rebuilds canvas / card / ink-3',
     /--td-canvas/.test(darkBlock) && /--td-card/.test(darkBlock) && /--td-text-3/.test(darkBlock),
     darkBlock.slice(0, 160))
   {
     // The host alias map keeps its one base accent. The two user-selectable
-    // appearances deliberately override it at their own roots; the floating
-    // window keeps the base gallery blue. Pin each layer so they cannot drift.
+    // appearances deliberately override it at their own roots, and the floating
+    // frame follows the saved choice instead of pinning a third palette.
     ok('V5 the base accent remains on the shared seat map',
       /\.td-seat\{[^}]*--td-accent:#3b82f6/.test(rules))
     ok('the flat theme uses its approved vivid blue',
       /\.td-seat\[data-todo-appearance="flat"\]\{[^}]*--td-accent:#145df0/.test(rules))
     ok('the editorial theme uses its restrained steel blue',
       /\.td-seat\[data-todo-appearance="editorial"\]\{[^}]*--td-accent:#496f89/.test(rules))
+    ok('the floating frame uses the shared hairline, radius and shadow',
+      /\.td-float\{[^}]*border:1px solid var\(--td-line-2\)[^}]*border-radius:var\(--td-r-lg\)[^}]*box-shadow:var\(--td-sh-2\)/.test(rules))
+    ok('the floating frame does not pin a third token palette',
+      !/\.td-float\{[^}]*--td-(?:canvas|card|soft|field|line|text|brand)\s*:/.test(rules))
+    ok('flat dark tokens are no longer withheld from the float frame or root',
+      /body\[data-ds-dark-theme\] \.td-seat\[data-todo-appearance="flat"\]\{/.test(rules)
+      && !/body\[data-ds-dark-theme\] \.td-seat\[data-todo-appearance="flat"\][^{}]*:not\(\.td-float/.test(rules))
     ok('flat calendar navigation drops the filled pill surface',
       /\.td-seat\[data-todo-appearance="flat"\]\s+\.td-cal-nav\{[^}]*background:transparent/.test(rules))
     ok('flat calendar tasks keep a thin list-color rail without a filled chip',
