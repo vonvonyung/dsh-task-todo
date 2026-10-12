@@ -396,6 +396,7 @@ ok('a seeded list is honoured', seededList.body.data.task.listId === seedTarget.
 // The client renders the shortcut hints from this payload, so an unset or broken
 // value has to arrive as a usable one.
 const settingsPayload = (await api('state')).body.data.settings
+ok('the state payload carries the safe default style', settingsPayload.appearance === 'flat', settingsPayload.appearance)
 ok('the state payload carries the hotkeys', settingsPayload.hotkey !== undefined
   && typeof settingsPayload.hotkey.capture === 'string' && typeof settingsPayload.hotkey.palette === 'string',
   settingsPayload.hotkey)

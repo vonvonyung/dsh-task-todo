@@ -81,6 +81,7 @@ const fresh = (opts = {}) => new TodoService(null, quiet, { settingsFile: fileOf
 
 const plain = fresh()
 eq('with no file, the schema defaults win', plain.settings.feishu.enabled, false)
+eq('the default interface style is the approved flat theme', plain.settings.appearance, 'flat')
 eq('the default key field is 任务ID', plain.settings.feishu.keyField, '任务ID')
 
 const seeded = fresh({ hostConfig: { weekStart: 0, badgeCount: 'overdue', feishu: { appId: 'from-patch' } } })
@@ -106,7 +107,7 @@ eq('the payload names the settings file', form.file, fileOf('svc.json'))
 eq('there is no error on a clean read', form.error, null)
 eq('the groups are the schema groups', form.groups.map((g) => g.key), ['', 'hotkey', 'feishu'])
 const paths = form.groups.flatMap((g) => g.fields.map((f) => f.path))
-for (const expected of ['enabled', 'dataFile', 'weekStart', 'defaultList', 'badgeCount',
+for (const expected of ['appearance', 'enabled', 'dataFile', 'weekStart', 'defaultList', 'badgeCount',
   'hotkey.capture', 'hotkey.palette', 'feishu.enabled', 'feishu.appId', 'feishu.appSecret',
   'feishu.appToken', 'feishu.tableId', 'feishu.baseUrl', 'feishu.autoSync', 'feishu.syncSubtasks',
   'feishu.includeDone', 'feishu.deleteRemoved', 'feishu.keyField']) {
@@ -116,6 +117,7 @@ const fields = form.groups.flatMap((g) => g.fields)
 eq('every field carries a title', fields.every((f) => typeof f.title === 'string' && f.title !== ''), true)
 eq('every field carries a type', fields.every((f) => ['string', 'boolean', 'number'].includes(f.type)), true)
 eq('the badge measure renders as a select', fields.find((f) => f.path === 'badgeCount').options, ['today', 'overdue', 'open'])
+eq('both approved interface styles are selectable', fields.find((f) => f.path === 'appearance').options, ['flat', 'editorial'])
 eq('the week start renders as a select', fields.find((f) => f.path === 'weekStart').options, [1, 0])
 eq('a boolean field is typed as one', fields.find((f) => f.path === 'feishu.enabled').type, 'boolean')
 gate('the settings payload is lossless JSON', form)
@@ -129,6 +131,11 @@ ok('the secret really is on disk', fs.readFileSync(fileOf('svc.json'), 'utf8').i
 gate('the payload after a save is lossless JSON', saved)
 eq('the saved values are live', plain.settings.feishu.enabled, true)
 eq('the sync is now considered configured', plain.feishuStatus().configured, true)
+
+const styled = plain.updateSettings({ appearance: 'editorial' })
+eq('the editor theme saves to the settings document', plain.settings.appearance, 'editorial')
+eq('the saved theme is returned to the settings form', styled.values.appearance, 'editorial')
+eq('the task state exposes the saved theme', plain.settingsView().appearance, 'editorial')
 
 const blank = plain.updateSettings({ feishu: { appSecret: '' } })
 eq('a blank secret keeps the stored one', plain.settings.feishu.appSecret, 'super-secret')
@@ -165,6 +172,8 @@ const reloaded = new TodoService(null, quiet, { settingsFile: fileOf('svc.json')
 eq('the values survive a restart', reloaded.settings.feishu.appId, 'cli_1')
 eq('the secret survives a restart', reloaded.settings.feishu.appSecret, 'super-secret')
 eq('the badge measure survives a restart', reloaded.settings.badgeCount, 'today')
+eq('the interface style survives a restart', reloaded.settings.appearance, 'editorial')
+eq('an unsupported interface style falls back to flat', plain.updateSettings({ appearance: 'cinematic' }).values.appearance, 'flat')
 
 console.log('--- a broken file must not break the plugin ---')
 const brokenFile = fileOf('broken.json')

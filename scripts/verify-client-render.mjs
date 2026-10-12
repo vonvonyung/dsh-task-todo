@@ -815,6 +815,49 @@ await ui.settle()
 ok('folding hides it again', ui.byClass('td-rail-data').length === 0)
 
 // ===========================================================================
+section('saved appearance switch')
+// ===========================================================================
+
+const panelRoot = () => ui.byClass('td-root')[0]
+const styleButton = () => ui.byClass('td-style-trigger')[0]
+const styleOption = (name) => overlay.byClass('td-style-choice')
+  .find((node) => node.props['aria-label'] === `选择${name}界面风格`)
+eq('the first-run panel uses the approved flat appearance',
+  panelRoot().props['data-todo-appearance'], 'flat')
+ok('the appearance switch has an accessible name',
+  styleButton()?.props['aria-label'] === '界面风格设置')
+styleButton().props.onClick({})
+await settleAll(3)
+ok('the header opens a frame-wide appearance dialog',
+  overlay.byClass('td-style-modal').length === 1
+  && overlay.byClass('td-modal-layer').some((node) => node.props['data-todo-appearance'] === 'flat'))
+eq('the picker exposes exactly the two approved styles', overlay.byClass('td-style-choice').length, 2)
+eq('the picker marks flat as the active style', styleOption('简洁扁平').props['aria-pressed'], 'true')
+ok('the editorial style is directly selectable', styleOption('杂志编辑') !== undefined)
+styleOption('杂志编辑').props.onClick({})
+await settleAll(4)
+eq('selecting editorial saves it through the real settings API', (await api('settings')).values.appearance, 'editorial')
+eq('the active panel changes to editorial immediately', panelRoot().props['data-todo-appearance'], 'editorial')
+ok('a re-query keeps the saved editorial appearance',
+  (await api('state')).settings.appearance === 'editorial')
+ui.byClass('td-icon').find((node) => node.props['aria-label'] === '重新载入').props.onClick({})
+await settleAll(3)
+eq('reloading state preserves the selected appearance', panelRoot().props['data-todo-appearance'], 'editorial')
+styleButton().props.onClick({})
+await settleAll(2)
+styleOption('简洁扁平').props.onClick({})
+await settleAll(4)
+eq('the flat style can be restored and is persisted', (await api('settings')).values.appearance, 'flat')
+eq('the panel root returns to flat after the save', panelRoot().props['data-todo-appearance'], 'flat')
+styleButton().props.onClick({})
+await settleAll(2)
+document.key(null, { key: 'Escape' })
+await settleAll(3)
+ok('Escape closes the appearance picker without changing the theme',
+  overlay.byClass('td-style-modal').length === 0
+  && panelRoot().props['data-todo-appearance'] === 'flat')
+
+// ===========================================================================
 section('populated state, driven through the real host')
 // ===========================================================================
 
@@ -1913,22 +1956,20 @@ const nowDone = (await api('state', { view: 'list', filter: 'all' })).tasks.find
 eq('Space toggled the focused row', nowDone, !wasDone)
 rootNow().props.onKeyDown(keyEvent('Enter', divTarget))
 await ui.settle(2)
-// "At least one", not "exactly one": the editor, the list-settings dialog and the
-// confirm card each own a `.td-modal-layer`, deliberately -- three fixed layers that
-// share a z-index make document order the paint order, so the confirm can be asked
-// from inside the editor (a probe reading of `modal:2` is that design, not a double
-// mount). The count is pinned as a SET below instead of a number here.
+// "At least one", not "exactly one": the editor, list-settings dialog, confirm
+// card and appearance picker each own a `.td-modal-layer`, deliberately -- fixed
+// layers share a z-index and document order is the paint order. The confirm can be
+// asked from inside the editor, so stacked layers are expected, not double mounts.
 ok('Enter opened the focused row', overlay.byClass('td-modal-layer').length >= 1)
-eq('the three modal layers are the three services that own one',
-  [...clientSource.matchAll(/className: 'td-seat td-modal-layer'/g)].length, 3)
+eq('the four modal layers each have one owner, including appearance settings',
+  [...clientSource.matchAll(/className: 'td-seat td-modal-layer'/g)].length, 4)
 document.key(null, { key: 'Escape' })
 await overlay.settle(2)
 ok('Escape closed it again', overlay.byClass('td-modal').length === 0)
 // `modal: 2` characterised at last, and item 3's Escape order pinned with it: the
 // second layer of a delete asked FOR from inside the editor is the confirm card --
-// two different services, not one service mounted twice (each of the three is
-// rendered from a single site: the overlay seat's stack). So a count check is
-// "at least one" and the pair is pinned by ROLE instead.
+// two different services, not one service mounted twice. The four layer types each
+// have one render site in the overlay stack; role assertions distinguish the pair.
 const buttonsIn = (node) => {
   const out = []
   const walk = (n) => {
@@ -2061,8 +2102,8 @@ section('visual system v2 (computed, not rendered)')
   }
 
   // --- V1/V2: the scale ladders -------------------------------------------
-  const FONT = new Set(['10.5px', '12.5px', '14px', '16px', '20px'])
-  const RADIUS = new Set(['0', '3px', '6px', '10px', '14px', '22px', '999px'])
+  const FONT = new Set(['10.5px', '12.5px', '14px', '16px', '18px', '20px'])
+  const RADIUS = new Set(['0', '2px', '3px', '5px', '6px', '8px', '10px', '14px', '22px', '999px'])
   const GAP = new Set(['4px', '8px', '12px', '16px'])
   const SPACE = new Set(['0', '2px', '4px', '6px', '8px', '12px', '16px', '24px', '32px', '48px'])
   // Keywords, percentages and functions are shapes rather than steps: a value the
@@ -2334,14 +2375,15 @@ section('visual system v2 (computed, not rendered)')
     /--td-canvas/.test(darkBlock) && /--td-card/.test(darkBlock) && /--td-text-3/.test(darkBlock),
     darkBlock.slice(0, 160))
   {
-    // v5 flipped D17 on purpose: the gallery blue is now the WHOLE plugin's
-    // accent (primary / selection / focus), and the floating window shares it
-    // instead of owning a private one. What must not drift is the declaration:
-    // one literal, in the token map, that every surface inherits -- a second
-    // declaration would let the panel and the window slowly become two blues.
-    const decls = parsed.filter((rule) => /--td-accent\s*:/.test(rule.body))
-    ok('V5 the accent is declared once, on the seat marker',
-      decls.length === 1 && /\.td-seat/.test(decls[0].sel), decls.map((rule) => rule.sel))
+    // The host alias map keeps its one base accent. The two user-selectable
+    // appearances deliberately override it at their own roots; the floating
+    // window keeps the base gallery blue. Pin each layer so they cannot drift.
+    ok('V5 the base accent remains on the shared seat map',
+      /\.td-seat\{[^}]*--td-accent:#3b82f6/.test(rules))
+    ok('the flat theme uses its approved vivid blue',
+      /\.td-seat\[data-todo-appearance="flat"\]\{[^}]*--td-accent:#145df0/.test(rules))
+    ok('the editorial theme uses its restrained steel blue',
+      /\.td-seat\[data-todo-appearance="editorial"\]\{[^}]*--td-accent:#496f89/.test(rules))
   }
 
   // The property is "hover moves the FILL, never the geometry". It used to be
@@ -2401,6 +2443,10 @@ ok('the Feishu credentials render',
 
 const inputFor = (label) => ui.byClass('td-set-input').find((n) => n.props['aria-label'] === label)
 const boxFor = (label) => ui.byClass('td-set-check').find((n) => n.props['aria-label'] === label)
+ok('the plugin settings page exposes the appearance preference', inputFor('界面风格')?.tag === 'select')
+eq('the settings form starts with the saved flat theme', inputFor('界面风格')?.props.value, 'flat')
+eq('both theme names are human-readable in the form',
+  inputFor('界面风格')?.children.map((option) => ui.text(option)), ['简洁扁平', '杂志编辑'])
 ok('the App ID input exists', inputFor('App ID') !== undefined)
 ok('the app_token input exists', inputFor('多维表格 app_token') !== undefined)
 eq('the secret renders as a password field', inputFor('App Secret').props.type, 'password')
@@ -2440,6 +2486,16 @@ const press = async (label) => {
   ui.byClass('td-set-btn').find((n) => ui.text(n) === label).props.onClick({})
   await ui.settle(2)
 }
+
+inputFor('界面风格').props.onChange({ target: { value: 'editorial' } })
+await ui.settle(2)
+eq('the settings form previews the chosen appearance', ui.byClass('td-set')[0].props['data-todo-appearance'], 'editorial')
+await press('保存')
+eq('saving the settings form persists the editorial appearance', (await api('settings')).values.appearance, 'editorial')
+inputFor('界面风格').props.onChange({ target: { value: 'flat' } })
+await ui.settle(2)
+await press('保存')
+eq('the settings form can restore the flat appearance', (await api('settings')).values.appearance, 'flat')
 
 await typeInto('App ID', 'cli_from_ui')
 await typeInto('App Secret', 'secret_from_ui')

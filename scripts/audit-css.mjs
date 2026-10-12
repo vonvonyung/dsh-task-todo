@@ -210,7 +210,8 @@ const LITERAL_COLOURS = new Set([
   // which is what makes the window read as a piece of the plugin. The cream and
   // ink values are surfaces / mixed into surfaces; the white --td-accent-on is
   // reserved for the fixed blue fill, never the theme-dependent host brand.
-  '#fffaf1', '#f6eedd', '#3b82f6', '#fff', '#16233a', '#4d6076',
+  '#fffaf1', '#f6eedd', '#3b82f6', '#145df0', '#496f89', '#b85e53', '#568b83',
+  '#fff', '#16233a', '#4d6076',
 ])
 const literals = [...new Set((cssRules.match(/#[0-9a-fA-F]{3,8}\b/g) ?? []).map((c) => c.toLowerCase()))]
 const stray = literals.filter((c) => !LITERAL_COLOURS.has(c)).sort()
@@ -275,10 +276,14 @@ const marked = new Set(classWindows.filter((set) => set.has(MARKER)).flatMap((se
 ok('the JSX marks the shared surfaces', marked.size >= 6, [...marked].sort())
 
 const seatRule = (test) => topRules.filter((rule) => rule.head.split(',')
-  .some((one) => new RegExp('^\\.' + MARKER + '(?![\\w-])').test(one.trim()))).filter(test)
+  .some((one) => new RegExp('^\\.' + MARKER + '(?![\\w-])').test(one.trim())))
+  // Appearance selectors are intentional token overrides layered on the shared map.
+  .filter((rule) => !/\[data-todo-appearance/.test(rule.head))
+  .filter(test)
 
 // 1. the mechanism itself: the marker carries map + box model + focus ring + baseline.
-ok('the marker declares the token map', seatRule((rule) => /--td-card\s*:/.test(rule.body) && /--td-canvas\s*:/.test(rule.body)).length === 1)
+ok('the marker declares one shared token map, with appearance overrides layered after it',
+  seatRule((rule) => /--td-card\s*:/.test(rule.body) && /--td-canvas\s*:/.test(rule.body)).length === 1)
 ok('the marker resets the box model for its subtree',
   seatRule((rule) => /\*/.test(rule.head) && /box-sizing\s*:\s*border-box/.test(rule.body)).length >= 1)
 ok('the marker draws the focus ring for its subtree',
@@ -498,18 +503,18 @@ ok('no seat root re-declares the map, the box model or the focus ring',
 // 3. the same hole one rename away: a token nothing declares resolves to nothing
 //    just as quietly as one that is declared in an unreachable place.
 //
-// Two names are per-ELEMENT values the JSX writes inline rather than theme tokens:
-// the row's staggered entrance delay and the column's list colour. The smart accent
-// is local too, but is resolved by the data-filter selector map rather than inline.
-// Keep those cases explicit and assert the writers, so this remains a net for orphans.
+// These values are intentionally local rather than part of the shared host-token
+// map: row entrance / list tint are inline, smart accents are assigned by the
+// filter-key rules, and editorial's serif stack belongs only to that appearance.
 const INLINE_TOKENS = ['--td-delay', '--td-tint']
-const CSS_LOCAL_TOKENS = ['--td-smart-accent']
+const CSS_LOCAL_TOKENS = ['--td-smart-accent', '--td-serif']
 const LOCAL_TOKENS = [...INLINE_TOKENS, ...CSS_LOCAL_TOKENS]
 const inlineWriters = INLINE_TOKENS.filter((name) => jsx.includes("'" + name + "'"))
 ok('the inline per-element tokens are really set by the JSX',
   inlineWriters.length === INLINE_TOKENS.length, INLINE_TOKENS.filter((n) => !inlineWriters.includes(n)))
-ok('the smart accent is assigned by the data-filter rules',
+ok('the smart accent and editorial serif stack have local writers',
   CSS_LOCAL_TOKENS.every((name) => cssRules.includes(name)))
+ok('the editorial style declares its serif fallback stack', /--td-serif\s*:\s*ui-serif/.test(cssRules))
 const declaredNames = new Set([...aliasBlock.matchAll(/--td-[\w-]+/g)].map((m) => m[0]))
 const consumed = new Set([...css.replace(/\/\*[\s\S]*?\*\//g, ' ').matchAll(/var\((--td-[\w-]+)/g)].map((m) => m[1]))
 const orphans = [...consumed].filter((name) => !declaredNames.has(name) && !LOCAL_TOKENS.includes(name)).sort()
