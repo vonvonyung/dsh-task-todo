@@ -365,10 +365,18 @@ function makeDocument() {
   const head = { children: [] }
   const listeners = new Map()
   const document = {
+    downloads: [],
     head: { appendChild(node) { node._parent = document.head; head.children.push(node) } },
-    body: { appendChild() {} },
+    body: {
+      children: [],
+      appendChild(node) { node._parent = document.body; this.children.push(node) },
+      removeChild(node) {
+        const index = this.children.indexOf(node)
+        if (index >= 0) this.children.splice(index, 1)
+      },
+    },
     createElement(tag) {
-      return {
+      const node = {
         tagName: String(tag).toUpperCase(),
         dataset: {},
         style: {},
@@ -380,6 +388,10 @@ function makeDocument() {
           if (index >= 0) head.children.splice(index, 1)
         },
       }
+      if (node.tagName === 'A') {
+        node.click = () => document.downloads.push({ href: node.href, filename: node.download })
+      }
+      return node
     },
     querySelector(selector) {
       const match = /^style\[data-plugin-css="(.*)"\]$/.exec(selector)
@@ -616,6 +628,9 @@ const sandbox = {
   Boolean,
   Error,
   Promise,
+  Blob,
+  URL,
+  URLSearchParams,
   Map,
   Set,
   Symbol,
@@ -770,6 +785,17 @@ ok('the empty state explains the rapid-add syntax', ui.text().includes('在下�
 ok('the overlay seat renders nothing while idle', overlay.byClass('td-modal').length === 0)
 ok('the smart-list rail is present',
   ui.byClass('td-side').length >= 6, ui.byClass('td-side').length)
+const smartRailKeys = ui.byClass('td-side')
+  .filter((node) => typeof node.props['data-smart-filter'] === 'string')
+  .map((node) => node.props['data-smart-filter'])
+ok('the rail exposes all six semantic filters to the stylesheet',
+  ['today', 'week', 'overdue', 'inbox', 'all', 'done'].every((key) => smartRailKeys.includes(key)),
+  smartRailKeys)
+const compactFilterKeys = ui.byClass('td-head2-tab')
+  .map((node) => node.props['data-smart-filter'])
+ok('the compact header shares the semantic filter keys',
+  ['today', 'week', 'overdue', 'inbox', 'all', 'done'].every((key) => compactFilterKeys.includes(key)),
+  compactFilterKeys)
 for (const label of ['今天', '最近 7 天', '已逾期', '未安排', '全部任务', '已完成']) {
   ok(`the rail offers ${label}`, ui.text().includes(label))
 }
@@ -796,12 +822,85 @@ ok('unfolding reveals the data block', ui.byClass('td-rail-data').length === 1)
 eq('the toggle now announces the open state', ui.byClass('td-rail-toggle')[0].props['aria-expanded'], 'true')
 ok('the rail says where the data is kept',
   ui.byClass('td-rail-file').length === 1 && ui.text().includes('复制它就是一份备份'))
-ok('the rail offers backup controls',
-  ['导出备份', '导入', '复制路径'].every((label) => ui.text().includes(label)))
+ok('the rail offers monthly export and backup controls',
+  ['导出月度计划', '导出备份', '导入', '复制路径'].every((label) => ui.text().includes(label)))
+const planExportButton = ui.tag('button').find((node) => ui.text(node) === '导出月度计划')
+ok('the monthly export action is reachable from the data module', planExportButton !== undefined)
+planExportButton?.props?.onClick?.({})
+await settleAll(3)
+const planDialog = overlay.byClass('td-modal').find((node) => node.props['aria-label'] === '导出月度计划表')
+ok('monthly export opens a host-wide dialog', planDialog !== undefined)
+ok('the dialog loads a template choice from the host',
+  overlay.tag('select').some((node) => node.props.value === 'plan_engine/template_2026-10-prototype.xlsx'))
+ok('the dialog defaults to a valid current month',
+  overlay.tag('input').some((node) => node.props.type === 'month' && /^\d{4}-(0[1-9]|1[0-2])$/.test(node.props.value)))
+ok('the per-export owner field is not persisted',
+  overlay.tag('input').some((node) => String(node.props.placeholder ?? '').includes('不会保存')))
+const exportMonth = overlay.tag('input').find((node) => node.props.type === 'month')
+const exportOwner = overlay.tag('input').find((node) => String(node.props.placeholder ?? '').includes('不会保存'))
+exportMonth?.props?.onChange?.({ target: { value: '2026-10' } })
+exportOwner?.props?.onChange?.({ target: { value: '测试填写人' } })
+await settleAll(2)
+eq('the selected month is retained before generation',
+  overlay.tag('input').find((node) => node.props.type === 'month')?.props.value, '2026-10')
+const generatePlan = overlay.tag('button').find((node) => ui.text(node) === '生成并下载')
+const originalTimeout = sandbox.setTimeout
+sandbox.setTimeout = (fn, delay, ...args) => originalTimeout(fn, delay === 4000 ? 0 : delay, ...args)
+try { await generatePlan?.props?.onClick?.() } finally { sandbox.setTimeout = originalTimeout }
+await settleAll(3)
+eq('the browser downloads the selected monthly workbook with its safe filename',
+  document.downloads[0]?.filename, '月度计划表-测试填写人-2026-10.xlsx')
+ok('the workbook is delivered through a browser Blob URL',
+  String(document.downloads[0]?.href ?? '').startsWith('blob:'))
+ok('the monthly export dialog closes cleanly after download',
+  !overlay.byClass('td-modal').some((node) => node.props['aria-label'] === '导出月度计划表'))
 // Fold it again: the rest of this run asserts the rail's default shape.
 ui.byClass('td-rail-toggle')[0].props.onClick({})
 await ui.settle()
 ok('folding hides it again', ui.byClass('td-rail-data').length === 0)
+
+// ===========================================================================
+section('saved appearance switch')
+// ===========================================================================
+
+const panelRoot = () => ui.byClass('td-root')[0]
+const styleButton = () => ui.byClass('td-style-trigger')[0]
+const styleOption = (name) => overlay.byClass('td-style-choice')
+  .find((node) => node.props['aria-label'] === `选择${name}界面风格`)
+eq('the first-run panel uses the approved flat appearance',
+  panelRoot().props['data-todo-appearance'], 'flat')
+ok('the appearance switch has an accessible name',
+  styleButton()?.props['aria-label'] === '界面风格设置')
+styleButton().props.onClick({})
+await settleAll(3)
+ok('the header opens a frame-wide appearance dialog',
+  overlay.byClass('td-style-modal').length === 1
+  && overlay.byClass('td-modal-layer').some((node) => node.props['data-todo-appearance'] === 'flat'))
+eq('the picker exposes exactly the two approved styles', overlay.byClass('td-style-choice').length, 2)
+eq('the picker marks flat as the active style', styleOption('简洁扁平').props['aria-pressed'], 'true')
+ok('the editorial style is directly selectable', styleOption('杂志编辑') !== undefined)
+styleOption('杂志编辑').props.onClick({})
+await settleAll(4)
+eq('selecting editorial saves it through the real settings API', (await api('settings')).values.appearance, 'editorial')
+eq('the active panel changes to editorial immediately', panelRoot().props['data-todo-appearance'], 'editorial')
+ok('a re-query keeps the saved editorial appearance',
+  (await api('state')).settings.appearance === 'editorial')
+ui.byClass('td-icon').find((node) => node.props['aria-label'] === '重新载入').props.onClick({})
+await settleAll(3)
+eq('reloading state preserves the selected appearance', panelRoot().props['data-todo-appearance'], 'editorial')
+styleButton().props.onClick({})
+await settleAll(2)
+styleOption('简洁扁平').props.onClick({})
+await settleAll(4)
+eq('the flat style can be restored and is persisted', (await api('settings')).values.appearance, 'flat')
+eq('the panel root returns to flat after the save', panelRoot().props['data-todo-appearance'], 'flat')
+styleButton().props.onClick({})
+await settleAll(2)
+document.key(null, { key: 'Escape' })
+await settleAll(3)
+ok('Escape closes the appearance picker without changing the theme',
+  overlay.byClass('td-style-modal').length === 0
+  && panelRoot().props['data-todo-appearance'] === 'flat')
 
 // ===========================================================================
 section('populated state, driven through the real host')
@@ -814,7 +913,7 @@ const yesterday = new Date(Date.parse(`${today}T00:00:00Z`) - 86400000).toISOStr
 
 const overdue = await api('create', { title: '逾期的报告', due: yesterday, priority: 3 })
 const dueToday = await api('create', { title: '今天的评审', due: `${today}T15:00`, list: '工作', note: '带上进度表' })
-const dueTomorrow = await api('create', { title: '明天的站会', due: tomorrow })
+const dueTomorrow = await api('create', { title: '明天的站会', due: `${tomorrow}T09:30` })
 const undated = await api('create', { title: '没有日期的想法' })
 const repeating = await api('create', {
   title: '每周一晨会',
@@ -1051,6 +1150,8 @@ ok('the calendar draws a full month grid', ui.byClass('td-cal-cell').length === 
 eq('the calendar draws seven weekday headers', ui.byClass('td-cal-wd').length, 7)
 ok('the month title is rendered', /\d{4} 年 \d+ 月/.test(ui.text()), ui.text().slice(0, 80))
 ok('tasks appear on the grid', ui.byClass('td-cal-task').length >= 1, ui.byClass('td-cal-task').length)
+ok('the calendar toolbar separates navigation from its summary',
+  ui.byClass('td-cal-h').length === 1 && ui.byClass('td-viewbar-divider').length === 1)
 ok('the repeating series lands on several days',
   ui.byClass('td-cal-task').filter((n) => ui.text(n).includes('每周一晨会')).length >= 2,
   ui.byClass('td-cal-task').filter((n) => ui.text(n).includes('每周一晨会')).length)
@@ -1114,6 +1215,9 @@ ok('the gantt draws a day header row', ui.byClass('td-gantt-cell').length >= 30,
 ok('the gantt draws task rows on the left', ui.byClass('td-gantt-row').length >= 3)
 ok('the gantt draws bars', ui.byClass('td-gantt-bar').length >= 2, ui.byClass('td-gantt-bar').length)
 ok('the gantt shows the window range', /\d{4}-\d{2}-\d{2} → \d{4}-\d{2}-\d{2}/.test(ui.text()), ui.text().slice(0, 120))
+ok('the Gantt toolbar explains drag-to-move and endpoint resize',
+  ui.byClass('td-gantt-instruction').length === 1
+  && ui.text(ui.byClass('td-gantt-instruction')[0]).includes('拖动两端调整范围'))
 ok('bars carry a title with dates',
   ui.byClass('td-gantt-bar').every((n) => typeof n.props.title === 'string' && n.props.title.length > 0))
 const beforeAnchor = ui.text().match(/(\d{4}-\d{2}-\d{2}) →/)?.[1]
@@ -1124,6 +1228,84 @@ ok('the gantt window shifts', beforeAnchor !== afterAnchor, { beforeAnchor, afte
 ui.byClass('td-cal-navb').find((n) => ui.text(n).includes('回到今天')).props.onClick({})
 await ui.settle()
 ok('the gantt returns to today', ui.text().includes(`${today} →`) || ui.text().includes(`-`) )
+const ganttDays = ui.byClass('td-gantt-cell').length
+const ganttWidth = 44
+const ganttHeader = ui.byClass('td-gantt-hd')[0]
+const ganttTracks = ui.byClass('td-gantt-track')
+ok('gantt header and tracks share one 44px-per-day grid',
+  ganttHeader?.props.style.gridTemplateColumns === `repeat(${ganttDays}, ${ganttWidth}px)`
+  && ganttHeader?.props.style.minWidth === ganttDays * ganttWidth
+  && ganttTracks.every((node) => node.props.style.gridTemplateColumns === `repeat(${ganttDays}, ${ganttWidth}px)`
+    && node.props.style.minWidth === ganttDays * ganttWidth),
+  { ganttDays, header: ganttHeader?.props.style, track: ganttTracks[0]?.props.style })
+const todayLine = ui.byClass('td-gantt-now')[0]
+ok('the gantt today line sits at the center of its date column',
+  todayLine !== undefined && (todayLine.props.style.left + 1) % ganttWidth === ganttWidth / 2,
+  todayLine?.props.style.left)
+
+const shiftDate = (date, days) => new Date(Date.parse(`${String(date).slice(0, 10)}T00:00:00Z`) + days * 86400000).toISOString().slice(0, 10)
+const shiftStoredDate = (value, days) => `${shiftDate(value, days)}${String(value).slice(10)}`
+const ganttBarFor = (title) => ui.byClass('td-gantt-bar').find((node) => node.props.title?.includes(title))
+const pointer = (clientX, pointerId = 17) => ({
+  clientX, pointerId,
+  preventDefault() {}, stopPropagation() {},
+  currentTarget: { setPointerCapture() {} },
+})
+const datedTaskBeforeDrag = (await api('state')).tasks.find((task) => task.id === dueTomorrow.created.id)
+const moveBar = ganttBarFor('明天的站会')
+ok('a Gantt bar offers pointer drag handlers',
+  typeof moveBar?.props.onPointerDown === 'function'
+  && typeof moveBar?.props.onPointerMove === 'function'
+  && typeof moveBar?.props.onPointerUp === 'function')
+moveBar.props.onPointerDown(pointer(420))
+await ui.settle(2)
+ganttBarFor('明天的站会').props.onPointerMove(pointer(420 + 2 * ganttWidth))
+await ui.settle(2)
+await ganttBarFor('明天的站会').props.onPointerUp(pointer(420 + 2 * ganttWidth))
+await ui.settle()
+const datedTaskAfterMove = (await api('state')).tasks.find((task) => task.id === dueTomorrow.created.id)
+eq('dragging the bar shifts its date while preserving its one-day milestone shape',
+  { start: datedTaskAfterMove.start, due: datedTaskAfterMove.due },
+  { start: null, due: shiftStoredDate(datedTaskBeforeDrag.due, 2) })
+
+let startGrip = ganttBarFor('明天的站会')?.children.find((node) =>
+  typeof node !== 'string' && String(node.props.className).includes('td-gantt-handle-start'))
+ok('the bar exposes a start-date resize handle', startGrip !== undefined)
+startGrip.props.onPointerDown(pointer(600, 18))
+await ui.settle(2)
+ganttBarFor('明天的站会').props.onPointerMove(pointer(600 - 2 * ganttWidth, 18))
+await ui.settle(2)
+await ganttBarFor('明天的站会').props.onPointerUp(pointer(600 - 2 * ganttWidth, 18))
+startGrip.props.onClick({ stopPropagation() {} })
+await ui.settle()
+const datedTaskAfterStartResize = (await api('state')).tasks.find((task) => task.id === dueTomorrow.created.id)
+eq('dragging the left endpoint adds/moves the start date only',
+  { start: datedTaskAfterStartResize.start, due: datedTaskAfterStartResize.due },
+  { start: shiftStoredDate(datedTaskAfterMove.due, -2), due: datedTaskAfterMove.due })
+
+let endGrip = ganttBarFor('明天的站会')?.children.find((node) =>
+  typeof node !== 'string' && String(node.props.className).includes('td-gantt-handle-end'))
+ok('the bar exposes an end-date resize handle', endGrip !== undefined)
+endGrip.props.onPointerDown(pointer(700, 19))
+await ui.settle(2)
+ganttBarFor('明天的站会').props.onPointerMove(pointer(700 + 3 * ganttWidth, 19))
+await ui.settle(2)
+await ganttBarFor('明天的站会').props.onPointerUp(pointer(700 + 3 * ganttWidth, 19))
+endGrip.props.onClick({ stopPropagation() {} })
+await ui.settle()
+const datedTaskAfterEndResize = (await api('state')).tasks.find((task) => task.id === dueTomorrow.created.id)
+eq('dragging the right endpoint changes the due date and keeps the start',
+  { start: datedTaskAfterEndResize.start, due: datedTaskAfterEndResize.due },
+  { start: datedTaskAfterStartResize.start, due: shiftStoredDate(datedTaskAfterStartResize.due, 3) })
+
+endGrip = ganttBarFor('明天的站会')?.children.find((node) =>
+  typeof node !== 'string' && String(node.props.className).includes('td-gantt-handle-end'))
+endGrip.props.onKeyDown({ key: 'ArrowRight', preventDefault() {}, stopPropagation() {} })
+await ui.settle()
+const datedTaskAfterKeyboard = (await api('state')).tasks.find((task) => task.id === dueTomorrow.created.id)
+eq('the date handles also support keyboard day-by-day nudging',
+  datedTaskAfterKeyboard.due, shiftStoredDate(datedTaskAfterEndResize.due, 1))
+ok('dragging and resizing do not open the task dialog', overlay.byClass('td-modal').length === 0)
 
 // ===========================================================================
 section('fullscreen is a second host sharing one store')
@@ -1679,9 +1861,15 @@ eq('Escape closes the palette', overlay.byClass('td-cmdk').length, 0)
 ok('the board is still the view after the palette closed', ui.byClass('td-col').length >= 1)
 
 // C5, across SEATS: the floating window is a different seat with its own subtree,
-// and its box shows what the panel was holding. This is the bug the store draft
-// fixes: the window used to open empty while a half-written sentence sat in the
-// panel behind it.
+// follows the saved appearance, and shows what the panel was holding. The two
+// window actions use line icons so a font fallback cannot change their meaning.
+const floatAction = ui.tag('button').find((node) => node.props['aria-label'] === '打开浮动小窗口')
+const floatGlyph = floatAction?.children.find((node) => node.tag === 'svg' && node.props.className === 'td-glyph')
+ok('the floating action has a dedicated pop-out SVG icon', floatGlyph !== undefined)
+eq('the floating action uses the outward-window path',
+  floatGlyph?.children[0]?.props.d,
+  'M9.1 3h4v4M13 3.1 7.7 8.4M10.2 8.2v3.6a1 1 0 0 1-1 1H4.1a1 1 0 0 1-1-1V5.2a1 1 0 0 1 1-1h3.2')
+eq('the floating action keeps its text label', ui.text(floatAction), '浮动')
 captureInput().props.onChange({ target: { value: '跨宿主草稿' } })
 await ui.settle(2)
 await openPalette()
@@ -1690,9 +1878,22 @@ await overlay.settle(2)
 overlay.byClass('td-cmdk-in')[0].props.onKeyDown(keyEvent('Enter', overlay.byClass('td-cmdk-in')[0]))
 await overlay.settle(3)
 const floatBar = overlay.byClass('td-qadd-float')[0]
+const floatFrame = overlay.byClass('td-float')[0]
+const floatInterior = overlay.byClass('td-floatapp')[0]
 ok('the floating window is its own seat with its own bar', floatBar !== undefined,
   overlay.byClass('td-qadd-float').length)
-eq('and its box shows the draft typed in the panel',
+eq('the floating frame follows the saved flat appearance',
+  floatFrame?.props['data-todo-appearance'], 'flat')
+eq('the floating app interior follows the saved flat appearance',
+  floatInterior?.props['data-todo-appearance'], 'flat')
+const dockAction = overlay.tag('button').find((node) => node.props['aria-label'] === '停靠回侧边栏面板')
+const dockGlyph = dockAction?.children.find((node) => node.tag === 'svg' && node.props.className === 'td-glyph')
+ok('the active window uses a dedicated dock SVG icon', dockGlyph !== undefined)
+eq('the dock action uses the panel-inward path',
+  dockGlyph?.children[0]?.props.d,
+  'M2.6 3.2h10.8v9.6H2.6zM5.5 3.2v9.6M12 8H7.8M9.7 6.1 7.8 8l1.9 1.9')
+eq('the dock control no longer uses a text arrow', overlay.text(dockAction), '')
+eq('the floating box shows the draft typed in the panel',
   floatBar?.children.find((n) => n.tag === 'input')?.props.value, '跨宿主草稿')
 document.key(null, { key: 'Escape' })
 await overlay.settle(2)
@@ -1888,22 +2089,20 @@ const nowDone = (await api('state', { view: 'list', filter: 'all' })).tasks.find
 eq('Space toggled the focused row', nowDone, !wasDone)
 rootNow().props.onKeyDown(keyEvent('Enter', divTarget))
 await ui.settle(2)
-// "At least one", not "exactly one": the editor, the list-settings dialog and the
-// confirm card each own a `.td-modal-layer`, deliberately -- three fixed layers that
-// share a z-index make document order the paint order, so the confirm can be asked
-// from inside the editor (a probe reading of `modal:2` is that design, not a double
-// mount). The count is pinned as a SET below instead of a number here.
+// "At least one", not "exactly one": the editor, list-settings dialog, confirm
+// card and appearance picker each own a `.td-modal-layer`, deliberately -- fixed
+// layers share a z-index and document order is the paint order. The confirm can be
+// asked from inside the editor, so stacked layers are expected, not double mounts.
 ok('Enter opened the focused row', overlay.byClass('td-modal-layer').length >= 1)
-eq('the three modal layers are the three services that own one',
-  [...clientSource.matchAll(/className: 'td-seat td-modal-layer'/g)].length, 3)
+eq('each modal layer has one render owner, including monthly export and appearance settings',
+  [...clientSource.matchAll(/className: 'td-seat td-modal-layer'/g)].length, 5)
 document.key(null, { key: 'Escape' })
 await overlay.settle(2)
 ok('Escape closed it again', overlay.byClass('td-modal').length === 0)
 // `modal: 2` characterised at last, and item 3's Escape order pinned with it: the
 // second layer of a delete asked FOR from inside the editor is the confirm card --
-// two different services, not one service mounted twice (each of the three is
-// rendered from a single site: the overlay seat's stack). So a count check is
-// "at least one" and the pair is pinned by ROLE instead.
+// two different services, not one service mounted twice. Each layer type has one
+// render site in the overlay stack; role assertions distinguish the pair.
 const buttonsIn = (node) => {
   const out = []
   const walk = (n) => {
@@ -2030,10 +2229,14 @@ section('visual system v2 (computed, not rendered)')
     .map((decl) => /^\s*([a-z-]+)\s*:\s*([\s\S]+)$/.exec(decl))
     .filter((m) => m !== null && m[1] === prop)
     .map((m) => m[2].trim())
+  const declaration = (selector, prop) => {
+    const rule = parsed.find((entry) => entry.sel.trim() === selector)
+    return rule === undefined ? null : declsOf(rule, prop)[0] ?? null
+  }
 
   // --- V1/V2: the scale ladders -------------------------------------------
-  const FONT = new Set(['10.5px', '12.5px', '14px', '16px', '20px'])
-  const RADIUS = new Set(['0', '3px', '6px', '10px', '14px', '22px', '999px'])
+  const FONT = new Set(['10.5px', '12.5px', '14px', '16px', '18px', '20px'])
+  const RADIUS = new Set(['0', '2px', '3px', '5px', '6px', '8px', '10px', '14px', '22px', '999px'])
   const GAP = new Set(['4px', '8px', '12px', '16px'])
   const SPACE = new Set(['0', '2px', '4px', '6px', '8px', '12px', '16px', '24px', '32px', '48px'])
   // Keywords, percentages and functions are shapes rather than steps: a value the
@@ -2065,6 +2268,20 @@ section('visual system v2 (computed, not rendered)')
   ok('V2 margin uses the ten-step ladder only', ladder('margin', SPACE).length === 0, ladder('margin', SPACE).slice(0, 12))
   ok('the ladder check skipped only non-step values, and reports how many',
     typeof skipped === 'number' && skipped < 200, skipped)
+  const CONTROL_SIZES = [
+    ['.td-btn', 'min-height', '36px'], ['.td-btn.sm', 'min-height', '32px'],
+    ['.td-icon', 'width', '32px'], ['.td-icon', 'height', '32px'],
+    ['.td-countbadge', 'height', '22px'], ['.td-side', 'min-height', '36px'],
+    ['.td-row', 'min-height', '48px'], ['.td-chk', 'width', '22px'], ['.td-chk', 'height', '22px'],
+    ['.td-qadd .td-in', 'height', '40px'], ['.td-send', 'width', '40px'], ['.td-send', 'height', '40px'],
+  ]
+  const sizeDrift = CONTROL_SIZES.filter(([selector, prop, expected]) => declaration(selector, prop) !== expected)
+  ok('primary controls follow a consistent size rhythm', sizeDrift.length === 0, sizeDrift)
+  const ganttLabelHeight = declaration('.td-gantt-row', 'height')
+  const ganttTrackHeight = declaration('.td-gantt-track', 'height')
+  ok('gantt labels and timeline tracks share the 48px row rhythm',
+    ganttLabelHeight === '48px' && ganttTrackHeight === ganttLabelHeight,
+    { ganttLabelHeight, ganttTrackHeight })
 
   // --- V3: the surface ladder and ink contrast, computed -------------------
   // The host tokens come from the installed theme when it can be found (the
@@ -2154,9 +2371,12 @@ section('visual system v2 (computed, not rendered)')
   const tokensFor = (mode) => {
     const source = hostTokens === null ? FALLBACK_TOKENS[mode] : hostTokens[mode]
     const map = { ...source }
+    const lightStart = rules.indexOf('.td-seat{')
+    const lightEnd = lightStart < 0 ? -1 : rules.indexOf('}', lightStart)
+    const darkStart = rules.indexOf('body[data-ds-dark-theme]')
     const block = mode === 'light'
-      ? rules.slice(rules.indexOf('.td-root,.td-modal-layer{'), rules.indexOf('.td-root{height:100%'))
-      : rules.slice(rules.indexOf('body[data-ds-dark-theme]'), rules.indexOf('body[data-ds-dark-theme]') + 1200)
+      ? lightStart < 0 || lightEnd < 0 ? '' : rules.slice(lightStart, lightEnd)
+      : darkStart < 0 ? '' : rules.slice(darkStart, darkStart + 1200)
     for (const decl of block.split(';')) {
       const m = /--(td-[\w-]+)\s*:\s*([^;}]+)/.exec(decl)
       if (m !== null) map[m[1]] = m[2].trim()
@@ -2272,7 +2492,7 @@ section('visual system v2 (computed, not rendered)')
     /\.td-col\{[^}]*background:var\(--td-card\)/.test(rules)
     && /\.td-card\{[^}]*background:var\(--td-soft\)/.test(rules))
 
-  // --- V4: ink-3 stays off the canvas; the float guard exists --------------
+  // --- V4: ink-3 stays off the canvas; float shares the theme map -----------
   const bodyOf = (selector) => {
     const at = rules.indexOf(selector + '{')
     return at < 0 ? null : rules.slice(at + selector.length + 1, rules.indexOf('}', at))
@@ -2282,21 +2502,37 @@ section('visual system v2 (computed, not rendered)')
     ok(`V4 ${selector} takes ink-2 where it lands on the canvas`,
       body !== null && /color:var\(--td-text-2\)/.test(body), body)
   }
-  ok('V4 the dark override guards the floating window',
-    /body\[data-ds-dark-theme\]\s+\.td-root:not\(\.td-floatapp\)/.test(rules))
+  ok('V4 the dark override reaches the floating frame and interior through the seat marker',
+    /body\[data-ds-dark-theme\]\s+\.td-seat\{[^}]*--td-canvas:/.test(rules))
   ok('V4 the dark override rebuilds canvas / card / ink-3',
     /--td-canvas/.test(darkBlock) && /--td-card/.test(darkBlock) && /--td-text-3/.test(darkBlock),
     darkBlock.slice(0, 160))
   {
-    const offenders = []
-    for (const rule of parsed) {
-      if (!/var\(--td-accent\)/.test(rule.body)) continue
-      // The floating window's skin, and only that: --td-accent is a hue the
-      // greyscale panel has no business showing (D17).
-      const scoped = /^\.td-float|^\.td-flogo|^\.td-cmp|^@keyframes|\.td-float|\.td-flogo|\.td-cmp/.test(rule.sel)
-      if (!scoped) offenders.push(rule.sel)
-    }
-    ok('V4 --td-accent never leaves the floating window', offenders.length === 0, offenders)
+    // The host alias map keeps its one base accent. The two user-selectable
+    // appearances deliberately override it at their own roots, and the floating
+    // frame follows the saved choice instead of pinning a third palette.
+    ok('V5 the base accent remains on the shared seat map',
+      /\.td-seat\{[^}]*--td-accent:#3b82f6/.test(rules))
+    ok('the flat theme uses its approved vivid blue',
+      /\.td-seat\[data-todo-appearance="flat"\]\{[^}]*--td-accent:#145df0/.test(rules))
+    ok('the editorial theme uses its restrained steel blue',
+      /\.td-seat\[data-todo-appearance="editorial"\]\{[^}]*--td-accent:#496f89/.test(rules))
+    ok('the floating frame uses the shared hairline, radius and shadow',
+      /\.td-float\{[^}]*border:1px solid var\(--td-line-2\)[^}]*border-radius:var\(--td-r-lg\)[^}]*box-shadow:var\(--td-sh-2\)/.test(rules))
+    ok('the floating frame does not pin a third token palette',
+      !/\.td-float\{[^}]*--td-(?:canvas|card|soft|field|line|text|brand)\s*:/.test(rules))
+    ok('flat dark tokens are no longer withheld from the float frame or root',
+      /body\[data-ds-dark-theme\] \.td-seat\[data-todo-appearance="flat"\]\{/.test(rules)
+      && !/body\[data-ds-dark-theme\] \.td-seat\[data-todo-appearance="flat"\][^{}]*:not\(\.td-float/.test(rules))
+    ok('flat calendar navigation drops the filled pill surface',
+      /\.td-seat\[data-todo-appearance="flat"\]\s+\.td-cal-nav\{[^}]*background:transparent/.test(rules))
+    ok('flat calendar tasks keep a thin list-color rail without a filled chip',
+      /\.td-seat\[data-todo-appearance="flat"\]\s+\.td-cal-task\{[^}]*border-left-width:2px;[^}]*background:transparent/.test(rules))
+    ok('flat task-editor cards use hairlines rather than raised shadows',
+      /\.td-seat\[data-todo-appearance="flat"\]\s+\.td-hero,[\s\S]*?\.td-seat\[data-todo-appearance="flat"\]\s+\.td-sect\{[^}]*box-shadow:none/.test(rules))
+    ok('Gantt bars expose both resize grips and keyboard focus styling',
+      /\.td-gantt-handle-start\{/.test(rules) && /\.td-gantt-handle-end\{/.test(rules)
+      && /\.td-gantt-handle:focus-visible/.test(rules))
   }
 
   // The property is "hover moves the FILL, never the geometry". It used to be
@@ -2307,13 +2543,15 @@ section('visual system v2 (computed, not rendered)')
   ok('V5 hover moves the fill (the interaction wash) rather than the geometry',
     /\.td-item:hover\{[^}]*background:var\(--td-hover\)/.test(rules)
     && !/\.td-item:hover\{[^}]*(padding|margin|transform|min-height)/.test(rules))
-  ok('V5 the focus ring is an ink wash, not the surface colour',
-    /box-shadow:0 0 0 3px color-mix\(in srgb,var\(--td-text\) 12%,transparent\)/.test(rules))
-  ok('V5 selection is an inset ink edge plus a same-layer fill',
-    /inset 3px 0 0 var\(--td-text\)/.test(rules) && /\.td-item\.cur\{[^}]*var\(--td-field\)/.test(rules))
+  // v5: the ring is an ACCENT wash rather than an ink one -- the blue is the
+  // single hue the chrome spends, and focus is one of its three jobs.
+  ok('V5 the focus ring is an accent wash, not the surface colour',
+    /box-shadow:0 0 0 3px color-mix\(in srgb,var\(--td-accent\) 18%,transparent\)/.test(rules))
+  ok('V5 selection is an inset accent edge plus a same-layer fill',
+    /inset 3px 0 0 var\(--td-accent\)/.test(rules) && /\.td-item\.cur\{[^}]*var\(--td-field\)/.test(rules))
   ok('V5 a dragged source is one opacity', /\.td-card\.dragging\{opacity:\.5\}/.test(rules)
     && /\.td-lrow\.dragging\{opacity:\.5\}/.test(rules))
-  ok('V5 a drop target is one ring', /0 0 0 2px var\(--td-text-2\)/.test(rules))
+  ok('V5 a drop target is one ring', /0 0 0 2px var\(--td-accent\)/.test(rules))
   ok('V5 completed work uses the inset surface in both themes',
     /\.td-item\.done\{[^}]*var\(--td-soft\)/.test(rules))
   ok('V5 the celebration uses the plugin ink, not the window blue',
@@ -2354,6 +2592,10 @@ ok('the Feishu credentials render',
 
 const inputFor = (label) => ui.byClass('td-set-input').find((n) => n.props['aria-label'] === label)
 const boxFor = (label) => ui.byClass('td-set-check').find((n) => n.props['aria-label'] === label)
+ok('the plugin settings page exposes the appearance preference', inputFor('界面风格')?.tag === 'select')
+eq('the settings form starts with the saved flat theme', inputFor('界面风格')?.props.value, 'flat')
+eq('both theme names are human-readable in the form',
+  inputFor('界面风格')?.children.map((option) => ui.text(option)), ['简洁扁平', '杂志编辑'])
 ok('the App ID input exists', inputFor('App ID') !== undefined)
 ok('the app_token input exists', inputFor('多维表格 app_token') !== undefined)
 eq('the secret renders as a password field', inputFor('App Secret').props.type, 'password')
@@ -2393,6 +2635,16 @@ const press = async (label) => {
   ui.byClass('td-set-btn').find((n) => ui.text(n) === label).props.onClick({})
   await ui.settle(2)
 }
+
+inputFor('界面风格').props.onChange({ target: { value: 'editorial' } })
+await ui.settle(2)
+eq('the settings form previews the chosen appearance', ui.byClass('td-set')[0].props['data-todo-appearance'], 'editorial')
+await press('保存')
+eq('saving the settings form persists the editorial appearance', (await api('settings')).values.appearance, 'editorial')
+inputFor('界面风格').props.onChange({ target: { value: 'flat' } })
+await ui.settle(2)
+await press('保存')
+eq('the settings form can restore the flat appearance', (await api('settings')).values.appearance, 'flat')
 
 await typeInto('App ID', 'cli_from_ui')
 await typeInto('App Secret', 'secret_from_ui')

@@ -10,8 +10,8 @@
  * Usage:
  *   node scripts/shot.mjs --url auto [--out <dir>]     read the URL from the server log
  *   node scripts/shot.mjs --url "http://127.0.0.1:4188/?token=..."
- *                        [--only <step>] [--width 1680] [--height 1050]
- *                        [--eval "<js expression>"]
+ *                        [--browser <Chrome/Edge path>] [--only <step>]
+ *                        [--width 1680] [--height 1050] [--eval "<js expression>"]
  *
  * `--only` runs the recipe up to and including the named step (a view is only
  * reachable through the steps that open it), which is the fast path while
@@ -65,17 +65,25 @@ if (URL_ARG === null) {
 
 // --- find a browser ---------------------------------------------------------
 
+const browserArg = argOf('browser', process.env.CHROME_PATH ?? process.env.CHROME_BIN ?? null)
 const CANDIDATES = [
+  ...(browserArg === null ? [] : [path.resolve(browserArg)]),
   'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
   'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
   path.join(os.homedir(), 'AppData', 'Local', 'Google', 'Chrome', 'Application', 'chrome.exe'),
   'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe',
   'C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe',
+  '/usr/bin/google-chrome-stable',
+  '/usr/bin/google-chrome',
+  '/usr/bin/chromium',
+  '/usr/bin/chromium-browser',
+  '/snap/bin/chromium',
+  '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
 ]
 
 const BROWSER = CANDIDATES.find((p) => fs.existsSync(p))
 if (BROWSER === undefined) {
-  console.error('no Chrome/Edge found')
+  console.error('no Chrome/Edge found (use --browser <path> or CHROME_PATH)')
   process.exit(2)
 }
 
@@ -161,6 +169,11 @@ class Cdp {
   }
 
   async shot(file) {
+    // The host auto-focuses the inline quick-add input in either seat. Use the
+    // active element rather than the first matching input so a floating-window
+    // screenshot blurs its own control, not the hidden panel's. Keep its value.
+    await this.eval(`(function () { var input = document.activeElement; if (input && input.matches && input.matches('.td-qadd .td-in')) input.blur(); return true })()`)
+
     const result = await this.send('Page.captureScreenshot', { format: 'png', captureBeyondViewport: false })
     fs.writeFileSync(file, Buffer.from(result.data, 'base64'))
     return fs.statSync(file).size
@@ -196,7 +209,7 @@ window.__shot = {
   },
   /** Tolerantly clear any first-run notice: absent is a pass, not a failure. */
   dismiss() {
-    const hit = window.__shot.all().find((n) => /^(继续|知道了|我知道了|稍后配置|稍后再说|跳过|开始使用|关闭)$/.test(window.__shot.norm(n.textContent)))
+    const hit = window.__shot.all().find((n) => /^(继续|知道了|我知道了|稍后配置|稍后再说|跳过|开始使用|关闭|continue|configure later|not now|got it|i understand|later|skip|start using|close|ok)$/i.test(window.__shot.norm(n.textContent)))
     if (!hit) return 'OK no notice'
     hit.click()
     return 'OK dismissed ' + window.__shot.norm(hit.textContent)
@@ -430,7 +443,9 @@ window.__shot = {
 
 const RECIPE = [
   { name: '00-dismiss', js: `__shot.dismiss()`, wait: 400 },
-  { name: '01-panel-list', js: `__shot.clickText('待办任务')`, wait: 1200 },
+  { name: '01-panel-list', js: `(function () { var result = __shot.clickText('待办任务'); setTimeout(function () { if (document.activeElement?.blur) document.activeElement.blur() }, 1200); return result })()`, wait: 7000 },
+  { name: '01a-floating-window', js: `__shot.clickSel('[aria-label="打开浮动小窗口"]')`, wait: 1200 },
+  { name: '01b-floating-window-docked', js: `__shot.clickSel('[aria-label="停靠回侧边栏面板"]')`, wait: 800 },
   { name: '02-full-list', js: `__shot.clickText('全屏')`, wait: 900 },
   { name: '03-full-board', js: `__shot.clickText('看板')`, wait: 900 },
   { name: '04-full-calendar', js: `__shot.clickText('日历')`, wait: 900 },
@@ -448,6 +463,8 @@ const RECIPE = [
   { name: '07e-list-delete-cancel', js: `__shot.dialogButton('取消')`, wait: 500 },
   { name: '07f-list-closed', js: `__shot.dialogButton('完成')`, wait: 600 },
   { name: '08-dialog', js: `__shot.clickRow('复盘')`, wait: 900 },
+  { name: '08a-appearance-picker', js: `__shot.clickSel('.td-style-trigger')`, wait: 500 },
+  { name: '08b-appearance-picker-close', js: `__shot.clickText('完成')`, wait: 400 },
   { name: '09-confirm', js: `__shot.clickText('删除任务')`, wait: 600 },
   { name: '10-confirm-cancel', js: `__shot.clickText('取消')`, wait: 500 },
   // Last, because it changes the rail order: the drag is the direct way to move
@@ -728,12 +745,18 @@ async function main() {
     `--user-data-dir=${userDataDir}`,
     `--window-size=${WIDTH},${HEIGHT}`,
     '--force-device-scale-factor=1',
+    '--lang=zh-CN',
     '--hide-scrollbars',
     '--no-first-run',
     '--no-default-browser-check',
     '--disable-extensions',
     '--disable-background-networking',
     '--disable-sync',
+    ...(process.platform === 'linux' ? [
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-dev-shm-usage',
+    ] : []),
     'about:blank',
   ], { stdio: 'ignore', detached: false })
 
