@@ -868,7 +868,7 @@ const yesterday = new Date(Date.parse(`${today}T00:00:00Z`) - 86400000).toISOStr
 
 const overdue = await api('create', { title: '逾期的报告', due: yesterday, priority: 3 })
 const dueToday = await api('create', { title: '今天的评审', due: `${today}T15:00`, list: '工作', note: '带上进度表' })
-const dueTomorrow = await api('create', { title: '明天的站会', due: tomorrow })
+const dueTomorrow = await api('create', { title: '明天的站会', due: `${tomorrow}T09:30` })
 const undated = await api('create', { title: '没有日期的想法' })
 const repeating = await api('create', {
   title: '每周一晨会',
@@ -1105,6 +1105,8 @@ ok('the calendar draws a full month grid', ui.byClass('td-cal-cell').length === 
 eq('the calendar draws seven weekday headers', ui.byClass('td-cal-wd').length, 7)
 ok('the month title is rendered', /\d{4} 年 \d+ 月/.test(ui.text()), ui.text().slice(0, 80))
 ok('tasks appear on the grid', ui.byClass('td-cal-task').length >= 1, ui.byClass('td-cal-task').length)
+ok('the calendar toolbar separates navigation from its summary',
+  ui.byClass('td-cal-h').length === 1 && ui.byClass('td-viewbar-divider').length === 1)
 ok('the repeating series lands on several days',
   ui.byClass('td-cal-task').filter((n) => ui.text(n).includes('每周一晨会')).length >= 2,
   ui.byClass('td-cal-task').filter((n) => ui.text(n).includes('每周一晨会')).length)
@@ -1168,6 +1170,9 @@ ok('the gantt draws a day header row', ui.byClass('td-gantt-cell').length >= 30,
 ok('the gantt draws task rows on the left', ui.byClass('td-gantt-row').length >= 3)
 ok('the gantt draws bars', ui.byClass('td-gantt-bar').length >= 2, ui.byClass('td-gantt-bar').length)
 ok('the gantt shows the window range', /\d{4}-\d{2}-\d{2} → \d{4}-\d{2}-\d{2}/.test(ui.text()), ui.text().slice(0, 120))
+ok('the Gantt toolbar explains drag-to-move and endpoint resize',
+  ui.byClass('td-gantt-instruction').length === 1
+  && ui.text(ui.byClass('td-gantt-instruction')[0]).includes('拖动两端调整范围'))
 ok('bars carry a title with dates',
   ui.byClass('td-gantt-bar').every((n) => typeof n.props.title === 'string' && n.props.title.length > 0))
 const beforeAnchor = ui.text().match(/(\d{4}-\d{2}-\d{2}) →/)?.[1]
@@ -1192,6 +1197,70 @@ const todayLine = ui.byClass('td-gantt-now')[0]
 ok('the gantt today line sits at the center of its date column',
   todayLine !== undefined && (todayLine.props.style.left + 1) % ganttWidth === ganttWidth / 2,
   todayLine?.props.style.left)
+
+const shiftDate = (date, days) => new Date(Date.parse(`${String(date).slice(0, 10)}T00:00:00Z`) + days * 86400000).toISOString().slice(0, 10)
+const shiftStoredDate = (value, days) => `${shiftDate(value, days)}${String(value).slice(10)}`
+const ganttBarFor = (title) => ui.byClass('td-gantt-bar').find((node) => node.props.title?.includes(title))
+const pointer = (clientX, pointerId = 17) => ({
+  clientX, pointerId,
+  preventDefault() {}, stopPropagation() {},
+  currentTarget: { setPointerCapture() {} },
+})
+const datedTaskBeforeDrag = (await api('state')).tasks.find((task) => task.id === dueTomorrow.created.id)
+const moveBar = ganttBarFor('明天的站会')
+ok('a Gantt bar offers pointer drag handlers',
+  typeof moveBar?.props.onPointerDown === 'function'
+  && typeof moveBar?.props.onPointerMove === 'function'
+  && typeof moveBar?.props.onPointerUp === 'function')
+moveBar.props.onPointerDown(pointer(420))
+await ui.settle(2)
+ganttBarFor('明天的站会').props.onPointerMove(pointer(420 + 2 * ganttWidth))
+await ui.settle(2)
+await ganttBarFor('明天的站会').props.onPointerUp(pointer(420 + 2 * ganttWidth))
+await ui.settle()
+const datedTaskAfterMove = (await api('state')).tasks.find((task) => task.id === dueTomorrow.created.id)
+eq('dragging the bar shifts its date while preserving its one-day milestone shape',
+  { start: datedTaskAfterMove.start, due: datedTaskAfterMove.due },
+  { start: null, due: shiftStoredDate(datedTaskBeforeDrag.due, 2) })
+
+let startGrip = ganttBarFor('明天的站会')?.children.find((node) =>
+  typeof node !== 'string' && String(node.props.className).includes('td-gantt-handle-start'))
+ok('the bar exposes a start-date resize handle', startGrip !== undefined)
+startGrip.props.onPointerDown(pointer(600, 18))
+await ui.settle(2)
+ganttBarFor('明天的站会').props.onPointerMove(pointer(600 - 2 * ganttWidth, 18))
+await ui.settle(2)
+await ganttBarFor('明天的站会').props.onPointerUp(pointer(600 - 2 * ganttWidth, 18))
+startGrip.props.onClick({ stopPropagation() {} })
+await ui.settle()
+const datedTaskAfterStartResize = (await api('state')).tasks.find((task) => task.id === dueTomorrow.created.id)
+eq('dragging the left endpoint adds/moves the start date only',
+  { start: datedTaskAfterStartResize.start, due: datedTaskAfterStartResize.due },
+  { start: shiftStoredDate(datedTaskAfterMove.due, -2), due: datedTaskAfterMove.due })
+
+let endGrip = ganttBarFor('明天的站会')?.children.find((node) =>
+  typeof node !== 'string' && String(node.props.className).includes('td-gantt-handle-end'))
+ok('the bar exposes an end-date resize handle', endGrip !== undefined)
+endGrip.props.onPointerDown(pointer(700, 19))
+await ui.settle(2)
+ganttBarFor('明天的站会').props.onPointerMove(pointer(700 + 3 * ganttWidth, 19))
+await ui.settle(2)
+await ganttBarFor('明天的站会').props.onPointerUp(pointer(700 + 3 * ganttWidth, 19))
+endGrip.props.onClick({ stopPropagation() {} })
+await ui.settle()
+const datedTaskAfterEndResize = (await api('state')).tasks.find((task) => task.id === dueTomorrow.created.id)
+eq('dragging the right endpoint changes the due date and keeps the start',
+  { start: datedTaskAfterEndResize.start, due: datedTaskAfterEndResize.due },
+  { start: datedTaskAfterStartResize.start, due: shiftStoredDate(datedTaskAfterStartResize.due, 3) })
+
+endGrip = ganttBarFor('明天的站会')?.children.find((node) =>
+  typeof node !== 'string' && String(node.props.className).includes('td-gantt-handle-end'))
+endGrip.props.onKeyDown({ key: 'ArrowRight', preventDefault() {}, stopPropagation() {} })
+await ui.settle()
+const datedTaskAfterKeyboard = (await api('state')).tasks.find((task) => task.id === dueTomorrow.created.id)
+eq('the date handles also support keyboard day-by-day nudging',
+  datedTaskAfterKeyboard.due, shiftStoredDate(datedTaskAfterEndResize.due, 1))
+ok('dragging and resizing do not open the task dialog', overlay.byClass('td-modal').length === 0)
 
 // ===========================================================================
 section('fullscreen is a second host sharing one store')
@@ -2384,6 +2453,15 @@ section('visual system v2 (computed, not rendered)')
       /\.td-seat\[data-todo-appearance="flat"\]\{[^}]*--td-accent:#145df0/.test(rules))
     ok('the editorial theme uses its restrained steel blue',
       /\.td-seat\[data-todo-appearance="editorial"\]\{[^}]*--td-accent:#496f89/.test(rules))
+    ok('flat calendar navigation drops the filled pill surface',
+      /\.td-seat\[data-todo-appearance="flat"\]\s+\.td-cal-nav\{[^}]*background:transparent/.test(rules))
+    ok('flat calendar tasks keep a thin list-color rail without a filled chip',
+      /\.td-seat\[data-todo-appearance="flat"\]\s+\.td-cal-task\{[^}]*border-left-width:2px;[^}]*background:transparent/.test(rules))
+    ok('flat task-editor cards use hairlines rather than raised shadows',
+      /\.td-seat\[data-todo-appearance="flat"\]\s+\.td-hero,[\s\S]*?\.td-seat\[data-todo-appearance="flat"\]\s+\.td-sect\{[^}]*box-shadow:none/.test(rules))
+    ok('Gantt bars expose both resize grips and keyboard focus styling',
+      /\.td-gantt-handle-start\{/.test(rules) && /\.td-gantt-handle-end\{/.test(rules)
+      && /\.td-gantt-handle:focus-visible/.test(rules))
   }
 
   // The property is "hover moves the FILL, never the geometry". It used to be
