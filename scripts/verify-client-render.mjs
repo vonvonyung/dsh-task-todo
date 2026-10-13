@@ -2530,6 +2530,8 @@ section('visual system v2 (computed, not rendered)')
       /\.td-seat\[data-todo-appearance="flat"\]\s+\.td-cal-task\{[^}]*border-left-width:2px;[^}]*background:transparent/.test(rules))
     ok('flat task-editor cards use hairlines rather than raised shadows',
       /\.td-seat\[data-todo-appearance="flat"\]\s+\.td-hero,[\s\S]*?\.td-seat\[data-todo-appearance="flat"\]\s+\.td-sect\{[^}]*box-shadow:none/.test(rules))
+    ok('task title input fills the available detail-card width',
+      /\.td-hero \.td-in\{[^}]*width:100%;[^}]*min-width:0/.test(rules))
     ok('Gantt bars expose both resize grips and keyboard focus styling',
       /\.td-gantt-handle-start\{/.test(rules) && /\.td-gantt-handle-end\{/.test(rules)
       && /\.td-gantt-handle:focus-visible/.test(rules))
