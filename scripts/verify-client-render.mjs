@@ -608,12 +608,22 @@ const ctx = {
 }
 
 let definition = null
-const sandbox = {
-  window: {
-    __ModuleLoader__: { load: (def) => { definition = def } },
-    confirm: () => true,
-    prompt: () => '测试清单',
+const windowListeners = new Map()
+class HarnessEvent {
+  constructor(type) { this.type = type }
+}
+const testWindow = {
+  __ModuleLoader__: { load: (def) => { definition = def } },
+  confirm: () => true,
+  prompt: () => '测试清单',
+  dispatchEvent(event) {
+    for (const listener of [...(windowListeners.get(event.type) ?? [])]) listener(event)
+    return true
   },
+}
+const sandbox = {
+  window: testWindow,
+  Event: HarnessEvent,
   console,
   document,
   setTimeout,
@@ -661,14 +671,97 @@ ok('the definition carries a factory', typeof definition?.factory === 'function'
 // Incident #2: a factory that does not take `require` has no way to obtain React.
 ok('the factory receives require', definition.factory.length >= 1, definition.factory.length)
 
+let taskActionsReadyEvents = 0
+let taskActionsApi = null
+let extensionReceivedTask = null
+let extensionReceivedApi = null
+let extensionRunCount = 0
+let disabledActionRunCount = 0
+const taskActionDisposers = []
+function registerTestBridgeActions() {
+  taskActionsReadyEvents++
+  const api = sandbox.window.__dshTodoTaskActions
+  if (api?.apiVersion !== 1) return
+  taskActionsApi = api
+  taskActionDisposers.push(api.register({
+    id: 'verify.sample',
+    label: (task) => `外部动作：${task.title}`,
+    order: 200,
+    run: async (task, actionApi) => {
+      extensionReceivedTask = task
+      extensionReceivedApi = actionApi
+      extensionRunCount++
+      return '外部动作已运行'
+    },
+  }))
+  taskActionDisposers.push(api.register({
+    id: 'verify.unavailable',
+    label: 'AI 任务台未运行',
+    order: 150,
+    enabled: () => false,
+    disabledReason: () => '请先打开 AI 任务台',
+    run: () => { disabledActionRunCount++ },
+  }))
+  taskActionDisposers.push(api.register({
+    id: 'verify.hidden',
+    label: '不应出现在菜单',
+    visible: () => false,
+    run: () => {},
+  }))
+}
+// Simulate a consumer bundle that starts before the todo bundle: it listens for
+// the owner API, then registers when the owner announces readiness. Keep these
+// event methods scoped to factory initialization so unrelated window-dependent
+// client effects retain the harness's original environment.
+sandbox.window.addEventListener = (type, listener) => {
+  if (!windowListeners.has(type)) windowListeners.set(type, new Set())
+  windowListeners.get(type).add(listener)
+}
+sandbox.window.removeEventListener = (type, listener) => windowListeners.get(type)?.delete(listener)
+sandbox.window.addEventListener('dsh-todo-task-actions-ready', registerTestBridgeActions)
 const plugin = definition.factory(sandbox.require)
+delete sandbox.window.addEventListener
+delete sandbox.window.removeEventListener
 ok('the factory returns a plugin with a name and apply()',
   typeof plugin?.name === 'string' && typeof plugin?.apply === 'function')
 ok('the plugin declares the slots dependency', Array.isArray(plugin.inject) && plugin.inject.includes('slots'), plugin.inject)
+ok('the task action API is published with version 1',
+  sandbox.window.__dshTodoTaskActions?.apiVersion === 1
+  && typeof sandbox.window.__dshTodoTaskActions.register === 'function')
+ok('a bridge loaded first receives the task-action-ready event',
+  taskActionsReadyEvents === 1 && taskActionsApi === sandbox.window.__dshTodoTaskActions,
+  taskActionsReadyEvents)
 plugin.apply(ctx)
 
 ok('React was obtained through require', requireCalls.includes('react'), requireCalls)
 ok('nothing else was required', requireCalls.every((id) => id === 'react'), requireCalls)
+
+// ===========================================================================
+section('task action registry contract')
+// ===========================================================================
+
+const sampleActions = taskActionsApi.forTask({ id: 't_test', title: '核对接口', done: false })
+eq('actions are sorted and unavailable actions stay visible but disabled',
+  sampleActions.map(({ id, label, order, enabled, disabledReason }) => ({ id, label, order, enabled, disabledReason })),
+  [
+    { id: 'verify.unavailable', label: 'AI 任务台未运行', order: 150, enabled: false, disabledReason: '请先打开 AI 任务台' },
+    { id: 'verify.sample', label: '外部动作：核对接口', order: 200, enabled: true, disabledReason: '' },
+  ])
+ok('the hidden predicate omits only its own action',
+  sampleActions.every((action) => action.id !== 'verify.hidden'))
+let invalidTaskActionRejected = false
+try { taskActionsApi.register({ id: 'verify.invalid', label: '缺 run' }) } catch { invalidTaskActionRejected = true }
+ok('invalid extensions are rejected at registration', invalidTaskActionRejected)
+let staleRunCount = 0
+let currentRunCount = 0
+const staleDisposer = taskActionsApi.register({ id: 'verify.replace', label: '旧动作', run: () => { staleRunCount++ } })
+const currentDisposer = taskActionsApi.register({ id: 'verify.replace', label: '新动作', run: () => { currentRunCount++ } })
+staleDisposer()
+ok('a stale disposer cannot remove a replacement with the same id',
+  taskActionsApi.forTask({ id: 't_test', title: '核对接口' }).some((action) => action.id === 'verify.replace' && action.label === '新动作'))
+currentDisposer()
+ok('the current disposer removes its own registration',
+  !taskActionsApi.forTask({ id: 't_test', title: '核对接口' }).some((action) => action.id === 'verify.replace'))
 
 
 // The settings page's report text, asserted directly on the builders.
@@ -1125,6 +1218,108 @@ await ui.settle()
 ok('the board renders one column per list', ui.byClass('td-col').length >= 2, ui.byClass('td-col').length)
 ok('the board shows list names', ui.text().includes('收集箱') && ui.text().includes('工作'))
 ok('cards are rendered', ui.byClass('td-card').length >= 4, ui.byClass('td-card').length)
+
+// A separate client bundle registered before todo loaded. The action appears in
+// the real task menu, observes its task-scoped API, and can report a toast result.
+const extensionCard = () => ui.byClass('td-card').find((node) => ui.text(node).includes('没有日期的想法'))
+const openExtensionMenu = () => {
+  const cardNode = extensionCard()
+  const trigger = ui.tag('button').find((node) => node.props.title === '移动到其他清单' && cardNode?.contains(node))
+  return trigger?.props.onClick({
+    stopPropagation() {},
+    currentTarget: { getBoundingClientRect: () => ({ bottom: 100, left: 240 }) },
+  })
+}
+openExtensionMenu()
+await ui.settle()
+let extensionMenu = ui.byClass('td-pop').find((node) => ui.text(node).includes('外部动作：没有日期的想法'))
+ok('the task menu contains the registered extension', extensionMenu !== undefined)
+let extensionButtons = extensionMenu?.children.filter((node) => node.tag === 'button' && node.props.className === 'td-task-action') ?? []
+eq('extension actions are ordered by their declared order', extensionButtons.map((node) => ui.text(node)), [
+  'AI 任务台未运行（请先打开 AI 任务台）',
+  '外部动作：没有日期的想法',
+])
+const menuButtons = extensionMenu?.children.filter((node) => node.tag === 'button') ?? []
+const menuButtonLabels = menuButtons.map((node) => ui.text(node))
+const firstActionIndex = menuButtons.findIndex((node) => node.props.className === 'td-task-action')
+const deleteActionIndex = menuButtonLabels.indexOf('删除任务')
+ok('extension actions follow list destinations and precede delete',
+  firstActionIndex > -1 && deleteActionIndex > menuButtonLabels.indexOf('外部动作：没有日期的想法')
+  && menuButtonLabels.indexOf('收集箱') < firstActionIndex)
+const unavailableButton = extensionButtons[0]
+ok('an unavailable action is visibly disabled with an explanation',
+  unavailableButton?.props.disabled === true && unavailableButton?.props.title === '请先打开 AI 任务台')
+await unavailableButton?.props.onClick({})
+ok('a disabled action cannot run', disabledActionRunCount === 0)
+const sampleActionButton = extensionButtons[1]
+await sampleActionButton?.props.onClick({})
+await ui.settle()
+ok('the registered action received the selected live task snapshot',
+  extensionRunCount === 1 && extensionReceivedTask?.id === undated.created.id
+  && extensionReceivedTask?.title === '没有日期的想法')
+ok('task snapshots are immutable', Object.isFrozen(extensionReceivedTask) && Object.isFrozen(extensionReceivedTask.tags))
+eq('the action API is narrow and does not expose the host call transport',
+  Object.keys(extensionReceivedApi ?? {}).sort(), ['mutate', 'refresh', 'settings'])
+ok('the action API omits call and credential-bearing settings',
+  extensionReceivedApi?.call === undefined
+  && extensionReceivedApi?.settings?.feishu === undefined
+  && extensionReceivedApi?.settings?.dataFile === undefined)
+let deleteMutationRejected = false
+try { extensionReceivedApi.mutate('delete') } catch { deleteMutationRejected = true }
+ok('task-scoped mutate rejects destructive or arbitrary methods', deleteMutationRejected)
+const scopedUpdateResult = await extensionReceivedApi.mutate('update', {
+  id: 'not-the-selected-task', title: '没有日期的想法',
+})
+await ui.settle()
+ok('update cannot retarget away from the selected task id',
+  scopedUpdateResult !== null
+  && (await api('state')).tasks.some((task) => task.id === extensionReceivedTask.id && task.title === '没有日期的想法'))
+ok('mutations return only a frozen task snapshot, never the full view state',
+  scopedUpdateResult?.id === extensionReceivedTask.id
+  && scopedUpdateResult?.state === undefined
+  && scopedUpdateResult?.tasks === undefined
+  && scopedUpdateResult?.dataFile === undefined
+  && Object.isFrozen(scopedUpdateResult))
+ok('a returned status string is announced to the user', ui.text().includes('外部动作已运行'))
+ok('the task menu closes after the action', ui.byClass('td-pop').length === 0)
+
+// Registering and disposing an action while a menu is open updates the menu
+// without requiring the user to close and reopen it.
+openExtensionMenu()
+await ui.settle()
+const disposeLateAction = sandbox.window.__dshTodoTaskActions.register({
+  id: 'verify.late', label: '后注册动作', order: 175, run: () => {},
+})
+await ui.settle()
+extensionMenu = ui.byClass('td-pop').find((node) => ui.text(node).includes('后注册动作'))
+ok('a late registration appears in an already-open menu', extensionMenu !== undefined)
+disposeLateAction()
+await ui.settle()
+ok('disposing an action removes it from an already-open menu',
+  !ui.byClass('td-pop').some((node) => ui.text(node).includes('后注册动作')))
+const extensionMenuCancel = ui.byClass('td-pop').flatMap((node) => node.children)
+  .find((node) => node.tag === 'button' && ui.text(node) === '取消')
+extensionMenuCancel?.props.onClick({})
+await ui.settle()
+ok('the extension menu can be dismissed normally', ui.byClass('td-pop').length === 0)
+
+openExtensionMenu()
+await ui.settle()
+const disposeRejectAction = taskActionsApi.register({
+  id: 'verify.reject', label: '失败动作', order: 250,
+  run: async () => { throw new Error('桥接暂不可用') },
+})
+await ui.settle()
+const rejectButton = ui.byClass('td-pop').flatMap((node) => node.children)
+  .find((node) => node.tag === 'button' && ui.text(node) === '失败动作')
+ok('late actions can reject asynchronously without breaking the menu', rejectButton !== undefined)
+await rejectButton?.props.onClick({})
+await ui.settle()
+ok('action failures are caught and reported in the todo toast',
+  ui.text().includes('失败动作失败：桥接暂不可用'))
+ok('the UI remains mounted after an extension error', ui.byClass('td-seat').length > 0)
+disposeRejectAction()
+await ui.settle()
 
 // drag a card to another column
 const workColumn = ui.byClass('td-col').find((n) => ui.text(n).includes('工作'))
