@@ -2,7 +2,7 @@
 
 > 状态（2026-10-13）：**待办侧 v1 任务菜单扩展 ABI 已在当前 checkout 实现；桥消费者尚未实现。** 已接受的默认方向是保留原待办、在 AI 任务台创建关联对象；先打通菜单创建想法，再处理需明确确认的工作启动，最后才考虑有审批保护的 agent 工具。AI 任务台侧优先使用受限、版本化的现有实例接口，不导出或复制 `L3` 句柄。
 >
-> 当前验证：`verify-client-render.mjs` 共 487 项；本次新增的 27 项全部通过。全脚本仍有 9 项既存 sidebar/keyboard 失败；用基准 `HEAD` 的原始客户端与原始脚本复测，460 项中出现完全相同的 9 项失败（详见 §6）。
+> 当前验证：`verify-client-render.mjs` **489/489 通过**（React 19.3.0）；`npm test` 全部 10 个 gate 通过，check-ready 为 **READY**。
 
 ## 1. 一句话
 
@@ -99,7 +99,7 @@ action = {
 }
 ```
 
-API 发布后派发 ready 事件，方便先加载的扩展等待；后加载的扩展直接读取全局对象。`task` 是深拷贝并冻结的快照，不是内部 store 句柄。菜单在“移动到其他清单”之后、“删除任务”之前渲染扩展项。`visible`/`enabled`/`label`/`disabledReason` 的异常或异步返回不会击穿待办 UI：异常动作会被跳过并记录诊断；`enabled:false` 保留为可解释的灰项。
+API 发布后派发 ready 事件，方便先加载的扩展等待；后加载的扩展直接读取全局对象。若全局上已有不同版本或不完整的 API，v1 会 fail closed 并保留现有对象，不会降级覆盖它。`task` 是深拷贝并冻结的快照，不是内部 store 句柄。菜单在“移动到其他清单”之后、“删除任务”之前渲染扩展项。`visible`/`enabled`/`label`/`disabledReason` 的异常或异步返回不会击穿待办 UI：异常动作会被跳过并记录诊断；`enabled:false` 保留为可解释的灰项。
 
 ### 4.2 回调权限与生命周期
 
@@ -119,7 +119,7 @@ API 发布后派发 ready 事件，方便先加载的扩展等待；后加载的
 4. **加载顺序与动态更新**：ready 事件、`subscribe` 和 `forTask` 覆盖先加载、后加载以及菜单打开期间注册/注销。
 5. **危险操作位置**：扩展项位于清单移动选项之后、删除任务之前。
 
-`scripts/verify-client-render.mjs` 从基线的 **460** 增至 **487** 项（新增 27 项）。新增覆盖包括事件加载顺序、排序、显隐/禁用、非法注册、替换与 stale disposer、菜单即时更新、扩展项相对删除操作的位置、冻结快照、回调 API 边界、任务 ID 作用域、mutate 回包隔离、状态 toast 和异步错误隔离。新增 27 项全部通过；全脚本的 9 项 sidebar/keyboard 失败也在未修改文件的 `HEAD` 基线复现，详见 §6。当前不能记为“全绿”。
+`scripts/verify-client-render.mjs` 从基线的 **460** 增至 **489** 项（新增 29 项）。新增覆盖包括事件加载顺序、排序、显隐/禁用、非法注册、替换与 stale disposer、菜单即时更新、扩展项相对删除操作的位置、冻结快照、回调 API 边界、任务 ID 作用域、mutate 回包隔离、状态 toast、错误隔离及不覆盖不兼容 API 版本。当前使用 React 19.3.0 时为 **489/489 全通过**；全量 gate 结果见 §6。
 
 ---
 
@@ -158,7 +158,7 @@ API 发布后派发 ready 事件，方便先加载的扩展等待；后加载的
 | 项 | 当前状态 |
 | --- | --- |
 | 待办端 v1 扩展 ABI 与菜单接入 | ✅ 已实现于固定分支 checkout，尚未提交 |
-| 新增的 27 项客户端断言 | ✅ 全部通过；覆盖 API、菜单、生命周期与错误隔离 |
+| 新增的 29 项客户端断言 | ✅ 全部通过；覆盖 API 版本边界、菜单、生命周期与错误隔离 |
 | 桥插件源码 | ❌ 远端 `dsh-todo-aitm-bridge` 为 public empty repo；无 refs、无默认分支，当前没有文件可检查或修改 |
 | AI 任务台改动 | ⏸️ 本 checkout 未改；已有 `L3`/发现路径核验记录见 §11.2 |
 | 菜单到 AI 任务台创建想法 | ❌ 尚未实现或端到端实测 |
@@ -168,9 +168,9 @@ API 发布后派发 ready 事件，方便先加载的扩展等待；后加载的
 ### 6.1 当前 checkout 的验证结果
 
 - `node --check lib/client.js` 与 `node --check scripts/verify-client-render.mjs` 通过。
-- `node scripts/verify-client-render.mjs`：**487 项中 9 项失败**。失败项集中在既有 sidebar 二次点击（5 项）和 document 键盘导航（4 项）；任务动作 API/菜单新增 27 项断言均通过。
-- 为区分回归，本次临时用 `git show HEAD:` 还原原始 `lib/client.js` 与原始验证脚本后复跑：基线 **460 项也失败完全相同的 9 项**。临时文件已恢复；因此这 9 项不是本次改动引入，但仍是交付门禁问题，不能把客户端 gate 记作全绿。
-- 全量 `npm test`：**9/10 个 gate 脚本通过**；`audit-shape`、`audit-css`、recurrence、store、markdown import、settings、plansheet、Feishu、JSON gate 均通过。唯一失败是 `verify-client-render.mjs` 的上述 9 项基线失败，因此 `check-ready` 报 `NOT READY`（package shape ready 仍为 true）。首次 CSS audit 曾因新增 JSX class 缺少专属选择器失败，已补 `.td-task-action` 规则并复跑全量测试通过该门禁。
+- `node scripts/verify-client-render.mjs`：**CLIENT RENDER: ALL PASS (489)**，使用 React 19.3.0。
+- 全量 `npm test`：**10/10 个 gate 脚本全部通过**；`check-ready` 报 `READY: all gates pass and the package is installable`。
+- 测试依赖在本机通过 `npm install --no-save --package-lock=false` 安装，没有修改 `package.json` 或 lockfile。该 harness 依赖 React 19 的 ref-in-props 行为；React 18.3.1 会令其模拟 DOM 无法绑定 ref，导致 9 项与 sidebar/keyboard 相关的假失败。改用 React 19.3.0 后客户端与全量 gate 均通过。
 
 ### 6.2 桥与端到端的阻塞
 
@@ -182,7 +182,7 @@ API 发布后派发 ready 事件，方便先加载的扩展等待；后加载的
 
 1. **“没有菜单行”不等于同一种故障。** 没有消费者注册时是正常的空菜单；消费者注册了但服务不可用时，应保留灰色禁用项和恢复原因；插件自身加载失败则应由宿主日志诊断。UI 不能把这些状态混为一谈。
 
-2. **客户端交互 gate 有已复现的基线失败。** 本 checkout 运行 487 项有 9 项 sidebar/keyboard 失败；`HEAD` 的原始 460 项同样失败相同 9 项。任务动作扩展的新增断言通过，但全 gate 仍需后续清理这些既存失败。
+2. **客户端 gate 对 React 版本有要求。** 测试 harness 将 React element 的 `ref` 从 props 绑定到模拟 DOM，依赖 React 19 的 ref-in-props 形状。React 18.3.1 会让 refs 为空并造成 9 项 sidebar/keyboard 假失败；React 19.3.0 下客户端 489/489、全量 gate 10/10 均通过。
 
 3. **旧 DSH Desktop 安装记录仅作历史上下文。** 其中关于 `docs/desktop-install.md` 的 `rejectElectronProfile`、实际安装方式等来自另一台机器/会话；本 sandbox 未复现，不能当作当前桥仓库状态或根因结论。
 
@@ -231,12 +231,12 @@ API 发布后派发 ready 事件，方便先加载的扩展等待；后加载的
 - **同意 §3.2 选独立桥插件 C**：这是可选集成，桥单独发布能隔离两边的依赖和故障。待办侧现已实现正式、版本化的 v1 菜单扩展点；桥侧应只调用 AI 任务台明确支持的集成接口。
 - **建议分阶段**：先让菜单可稳定地“在任务台创建想法”；然后处理“创建并启动工作”的确认、幂等和失败恢复；最后再增加 agent 工具。这样不会让工具依赖或有副作用的启动流程阻塞最基本的想法创建。
 - **待实现项是受限的服务发现与调用接口**：源码核验发现，AI 任务台已有同源 `GET /aitm-plugin/config` 路由为自己的面板提供随机 L3 URL；它可用于调研，但响应含诊断信息，尚非承诺的跨插件 API。已接受的方向是收敛成窄、版本化接口；直接 `L3.invoke()` 只对持有实例的 AI 任务台插件代码可用，并未暴露给桥。
-- 本评审针对方案和源码边界，不代表桥插件或真实 DSH 环境已经通过端到端验证。当前 checkout 已实现并可复核待办侧 ABI；`verify-client-render.mjs` 有 487 项，其中新增 27 项通过，另有 9 项在基准 HEAD 同样复现的既存失败。桥仓库当前公开但为空，尚无消费者代码可独立审查。
+- 本评审针对方案和源码边界，不代表桥插件或真实 DSH 环境已经通过端到端验证。当前 checkout 已实现并可复核待办侧 ABI；`verify-client-render.mjs` 在 React 19.3.0 下 489/489 通过，`npm test` 的 10 个 gate 全部通过。桥仓库当前公开但为空，尚无消费者代码可独立审查。
 
 ### 10.2 对评审意见与实现边界的逐项答复
 
 1. **§3.2 选 C：基本认同。** 前提是先确认 DSH 没有可复用的宿主级插件通信/服务发现接口。若没有，独立桥是清楚的边界；但不能仅凭“客户端模块图互相不可见”就推出宿主半边也没有更稳的服务接缝。
-2. **§4.1 扩展点：已按建议收敛为 v1 契约。** 当前 API 显式暴露 `apiVersion`、ready 事件、注册/订阅/注销、任务快照生命周期；`settings` 与 `mutate` 的字段范围有明确限制。`visible` 与 `enabled` 分开，`enabled:false` 会保留禁用行，并由 `disabledReason` 说明原因；新增客户端断言覆盖这些边界。
+2. **§4.1 扩展点：已按建议收敛为 v1 契约。** 当前 API 显式暴露 `apiVersion`、ready 事件、注册/订阅/注销、任务快照生命周期；不同版本不会互相覆盖。`settings` 与 `mutate` 的字段范围有明确限制。`visible` 与 `enabled` 分开，`enabled:false` 会保留禁用行，并由 `disabledReason` 说明原因；新增客户端断言覆盖这些边界。
 3. **agent 工具后置。** 这能把菜单主路径与 `dsh-tools` 解析/运行时 schema 风险隔离。后续若增加工具，应验证 JSON Schema 注册、暴露、参数校验和执行；任何会启动 AI 工作的工具都必须有宿主级审批/授权，不能把 `window.confirm` 当作授权机制。
 4. **§5.5：采用诚实的通用不可用提示。** 单凭探测失败不能区分“未安装”“未启动”“重启中”或“端口变化”；当前扩展 ABI 已提供 `visible`、`enabled` 和 `disabledReason`，桥可保留灰色行而不声称无法验证的具体原因。
 5. **旧 Windows junction 记录不构成当前根因结论。** 该路径/`MODULE_NOT_FOUND` 现象未在本 sandbox 复现；当前可确认的桥侧事实是远端仓库为空。若日后真实插件加载失败，应先取得完整宿主错误，再在隔离 profile 中比较安装方式与解析路径。

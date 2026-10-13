@@ -731,6 +731,17 @@ ok('the task action API is published with version 1',
 ok('a bridge loaded first receives the task-action-ready event',
   taskActionsReadyEvents === 1 && taskActionsApi === sandbox.window.__dshTodoTaskActions,
   taskActionsReadyEvents)
+const compatibleApi = sandbox.window.__dshTodoTaskActions
+const futureApi = { apiVersion: 2, register() {}, subscribe() {}, forTask() { return [] } }
+const originalWarn = console.warn
+console.warn = () => {}
+sandbox.window.__dshTodoTaskActions = futureApi
+const secondVersionPlugin = definition.factory(sandbox.require)
+console.warn = originalWarn
+ok('a v1 client does not overwrite a future task-action API',
+  sandbox.window.__dshTodoTaskActions === futureApi && typeof secondVersionPlugin?.apply === 'function')
+ok('an incompatible API does not emit a false v1 ready event', taskActionsReadyEvents === 1)
+sandbox.window.__dshTodoTaskActions = compatibleApi
 plugin.apply(ctx)
 
 ok('React was obtained through require', requireCalls.includes('react'), requireCalls)
