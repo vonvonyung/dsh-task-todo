@@ -14,6 +14,7 @@ import path from 'node:path'
 import http from 'node:http'
 import { pathToFileURL } from 'node:url'
 import { isJsonValue, snapshotJsonValue } from '@deepseek-ai/dsh-util-values'
+import { addDays, today as todayStr } from '../lib/recurrence.js'
 import { unzipSync } from 'fflate'
 
 // Workspace-local scratch space: the system temp directory is not reliably
@@ -104,7 +105,16 @@ gate('task_update (re-add a repeat rule)', await call('task_update', { id: '每�
 gate('task_update (move list and set tags)', await call('task_update', { id: '改名了', list: '收集箱', tags: ['a', 'b'] }))
 gate('task_update (promote a subtask)', await call('task_update', { id: '拉数据', parent: '' }))
 
-gate('task_done (one-shot)', await call('task_done', { id: '改名了' }))
+const doneWithFollowUp = await call('task_done', {
+  id: '改名了',
+  completionSummary: '已完成并记录结果。',
+  followUpTitle: '核对后续结果',
+})
+gate('task_done (one-shot with summary and linked follow-up)', doneWithFollowUp)
+ok('task_done returns the completion record and linked follow-up with a default 30-day due date',
+  doneWithFollowUp.task.completionRecords.at(-1).summary === '已完成并记录结果。'
+  && doneWithFollowUp.followUp.followUpOf === doneWithFollowUp.task.id
+  && doneWithFollowUp.followUp.due.slice(0, 10) === addDays(todayStr(), 30))
 gate('task_done (undo)', await call('task_done', { id: '改名了', undone: true }))
 gate('task_done (repeating task rolls)', await call('task_done', { id: '交季度报告' }))
 
@@ -268,7 +278,18 @@ for (const [method, args] of [
 const created = await api('create', { title: '用于更新的任务' })
 const createdId = created.body.data.created.id
 gate('API update', (await api('update', { id: createdId, note: 'x', priority: 1 })).body)
-gate('API toggle', (await api('toggle', { id: createdId })).body)
+const apiCompletion = await api('toggle', {
+  id: createdId,
+  done: true,
+  today: '2026-09-17',
+  completionSummary: 'HTTP 完成记录',
+  followUp: { title: 'HTTP 跟进任务' },
+})
+gate('API toggle with summary and follow-up', apiCompletion.body)
+ok('API toggle returns a linked follow-up task with the default 30-day due date',
+  apiCompletion.body.data.task.completionRecords.at(-1).summary === 'HTTP 完成记录'
+  && apiCompletion.body.data.followUp.followUpOf === createdId
+  && apiCompletion.body.data.followUp.due.slice(0, 10) === '2026-10-17')
 gate('API toggle back', (await api('toggle', { id: createdId, done: false })).body)
 gate('API move', (await api('move', { id: createdId, index: 0 })).body)
 gate('API remove', (await api('remove', { id: createdId })).body)
