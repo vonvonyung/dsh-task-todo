@@ -14,7 +14,7 @@
 | `task_list` | 查询任务 | `filter`(today/week/overdue/inbox/all/done)、`list`、`query`、`tag`、`includeDone`、`includeSubtasks` |
 | `task_add` | 新建任务或子任务 | `title`、`due`、`start`、`priority`(0-3)、`list`、`tags`、`note`、`repeat`、`repeatInterval`、`repeatWeekdays`、`repeatUntil`、`repeatCount`、`parent` |
 | `task_update` | 修改任务 | `id`（也可用唯一标题）、任意可改字段；`repeat: ''` 取消重复 |
-| `task_done` | 完成 / 取消完成 / 推进重复任务 | `id`、`undone`、可选 `completionSummary`、`followUpTitle` + `followUpDue` |
+| `task_done` | 完成 / 取消完成 / 推进重复任务 | `id`、`undone`、可选 `completionSummary`、`followUpTitle`（可选 `followUpDue`，默认 30 天后） |
 | `task_delete` | 删除任务（连同子任务） | `id` |
 | `list_manage` | 管理清单本身：列出 / 新建 / 改名 / 换色 / 排序 / 删除 | `action`(list/create/update/move/delete)、`id` 或唯一清单名、`name`、`newName`、`color`、`index`、`delta` |
 | `task_sync_feishu` | 把任务（含各状态）同步到飞书多维表格 | `action`(status/test/fields/reconcile/pull/sync)、`dryRun`、`prune` |
@@ -155,7 +155,7 @@
   它会指出卡在哪一步（`token` / `fields` / `records`）并原样保留飞书的 `code`/`message`，
   把那段原文给用户看，比自己解释「可能是权限问题」有用得多。
 - **表是新建的空表就先 `action=fields`**：按表头清单把缺的列一次建齐（全「文本」类型，
-  已有列不删不改）。用户说「同步报 FieldNameNotFound / 表里没列」时用这个。
+  已有列不删不改），包括 `完成记录` 与 `关联跟进`。这两列由本地同步到飞书；补洞时若远端有这两列，报告会注明无法重建完成历史/关联。用户说「同步报 FieldNameNotFound / 表里没列」时用这个。
 - **两端是否一致用 `action=reconcile`**：只读，逐行给出 一致 / 有差异（含哪几列）/
   本地有远端没有 / 远端有本地没有 / 远端无匹配列的行。用户问「为什么飞书里少了几条」
   或「和我本地对不上」时用它，而不是直接 sync（sync 会把本地的删除推过去）。

@@ -1187,6 +1187,28 @@ ok('a follow-up task links back to its source task',
 overlay.byClass('td-modal-close').find((node) => node.props.title === '关闭（Esc）').props.onClick({})
 await ui.settle()
 
+// A DSH tool can complete a task while this client is still mounted. Opening
+// the detail again must refresh the task projection rather than showing the
+// stale copy the panel loaded before the tool ran.
+const outOfBandTask = await api('create', { title: '工具更新记录测试', due: today })
+ui.byClass('td-icon').find((node) => node.props['aria-label'] === '重新载入').props.onClick({})
+await ui.settle(3)
+ui.clickable(ui.find('工具更新记录测试')).props.onClick({})
+await ui.settle(3)
+await tools.find((tool) => tool.name === 'task_done').execute({
+  id: outOfBandTask.created.id,
+  completionSummary: '由 DSH 工具写入的完成记录。',
+}, {})
+await api('toggle', { id: outOfBandTask.created.id, done: false })
+overlay.byClass('td-modal-close').find((node) => node.props.title === '关闭（Esc）').props.onClick({})
+await ui.settle()
+ui.clickable(ui.find('工具更新记录测试')).props.onClick({})
+await ui.settle(4)
+ok('reopening details refreshes completion records written by a DSH tool',
+  overlay.text().includes('由 DSH 工具写入的完成记录。'))
+overlay.byClass('td-modal-close').find((node) => node.props.title === '关闭（Esc）').props.onClick({})
+await ui.settle()
+
 // ===========================================================================
 section('the centred dialog edits the real task')
 // ===========================================================================

@@ -188,6 +188,26 @@ const childFields = taskToFields(store.get(sub1.id), store, { today: T })
 eq('a subtask row names its parent', childFields['父任务'], '交季度报告')
 eq('a top-level row has no parent', fields['父任务'], '')
 eq('the key column name is configurable', taskToFields(report, store, { today: T, keyField: 'ID' }).ID, report.id)
+
+const completionSource = store.create({ title: '已提交软著申请', due: T })
+const completedSource = store.toggle(completionSource.id, {
+  today: T,
+  completionSummary: '材料已经提交，等待审批。',
+  followUp: { title: '核对审批结果', due: '2026-10-17' },
+})
+const completionRecord = completedSource.completionRecords.at(-1)
+const completionFollowUp = store.get(completionRecord.followUpTaskId)
+const completedFields = taskToFields(completedSource, store, { today: T })
+const followUpFields = taskToFields(completionFollowUp, store, { today: T })
+eq('the completion history is mirrored in its own Feishu column',
+  completedFields[FEISHU_FIELDS.completionRecords],
+  `${completionRecord.at.replace('T', ' ')}｜材料已经提交，等待审批。`)
+ok('the source row mirrors its related follow-up task',
+  completedFields[FEISHU_FIELDS.relatedFollowUps].includes(`跟进任务：核对审批结果（${completionFollowUp.id}；未完成；截止 2026-10-17）`))
+ok('the follow-up row mirrors its source task',
+  followUpFields[FEISHU_FIELDS.relatedFollowUps].includes(`来源任务：已提交软著申请（${completedSource.id}）`))
+gate('a mapped row with completion history is lossless JSON', completedFields)
+gate('a mapped follow-up row is lossless JSON', followUpFields)
 gate('a mapped row is lossless JSON', fields)
 
 console.log('--- the pure diff ---')
@@ -313,14 +333,19 @@ const updateCall = syncServer.state.calls.filter((c) => c.pathname.endsWith('/ba
 const changedFields = Object.keys(updateCall.body.records[0].fields)
 // Only the changed fields are sent: an unchanged title or due date in the body
 // would still be a rewrite of a column the user may have edited by hand.
-ok('the update body carries the changed status columns',
-  changedFields.includes('状态') && changedFields.includes('完成'), changedFields)
+ok('the update body carries status and completion-history columns',
+  changedFields.includes('状态') && changedFields.includes('完成')
+  && changedFields.includes(FEISHU_FIELDS.completionRecords), changedFields)
 ok('the update body leaves the unchanged columns alone',
   !changedFields.includes('标题') && !changedFields.includes('截止时间') && !changedFields.includes('任务ID'),
   changedFields)
 const remoteA = [...syncServer.state.records.values()].find((f) => f['任务ID'] === a.id)
 eq('the remote status now reads 已完成', remoteA['状态'], '已完成')
 eq('the remote 完成 column now reads 是', remoteA['完成'], '是')
+const syncedCompletionRecord = syncStore.get(a.id).completionRecords.at(-1)
+eq('the remote completion-history column carries the timestamp and optional-empty marker',
+  remoteA[FEISHU_FIELDS.completionRecords],
+  `${syncedCompletionRecord.at.replace('T', ' ')}｜（未填写完成情况）`)
 
 console.log('--- deletions are opt-in AND tombstone-gated ---')
 syncStore.remove(b.id)
@@ -552,6 +577,8 @@ console.log('--- required columns ---')
 const wanted = requiredColumns('任务ID')
 eq('the key column comes first', wanted[0], '任务ID')
 ok('every writable column is required', Object.values(FEISHU_FIELDS).every((name) => wanted.includes(name)))
+ok('completion history and follow-up columns are part of the required schema',
+  [FEISHU_FIELDS.completionRecords, FEISHU_FIELDS.relatedFollowUps].every((name) => wanted.includes(name)))
 eq('no column is listed twice', wanted.length, new Set(wanted).size)
 eq('a custom key column is not duplicated when it is also a column name',
   requiredColumns(FEISHU_FIELDS.title).filter((name) => name === FEISHU_FIELDS.title).length, 1)
@@ -622,6 +649,16 @@ const halfSync = new FeishuSync({ ...FEISHU_DEFAULTS, appId: 'a', appSecret: 'b'
 const half = await halfSync.ensureFields({})
 eq('an existing key column is not re-created', halfServer.state.fields.filter((n) => n === '任务ID').length, 1)
 eq('only the rest is added', half.created.length, wanted.length - 1)
+
+const completionColumnNames = [FEISHU_FIELDS.completionRecords, FEISHU_FIELDS.relatedFollowUps]
+const legacyServer = makeFeishuServer({ fields: wanted.filter((name) => !completionColumnNames.includes(name)) })
+const legacySync = new FeishuSync({ ...FEISHU_DEFAULTS, appId: 'a', appSecret: 'b', appToken: 'c', tableId: 'd' },
+  null, { fetch: legacyServer.fetch })
+const upgraded = await legacySync.ensureFields({})
+eq('an existing legacy table is upgraded with exactly the new feature columns',
+  upgraded.created.sort(), [...completionColumnNames].sort())
+eq('the new columns are included in the final schema probe',
+  missingColumns(legacyServer.state.fields, '任务ID'), [])
 
 console.log('--- full reconciliation: both sides, including the rows a sync ignores ---')
 const recServer = makeFeishuServer({ fields: wanted })
@@ -715,13 +752,15 @@ const mapped = remoteRowToTask({
   标题: '映射', 备注: 'n', 完成: '是', 清单: '工作', 优先级: '中', 标签: 'x, y',
   截止时间: '2026-09-30', 开始时间: '2026-09-28', 父任务: '父任务标题', 创建时间: '2026-09-01T00:00:00.000Z',
   重复: '每周 周五', 状态: '已完成', 逾期: '否', 子任务进度: '1/2',
+  完成记录: '2026-09-17 08:00｜材料已提交', 关联跟进: '跟进任务：核对审批',
 }, '任务ID', (title) => (title === '父任务标题' ? 't_parent' : null))
 eq('the mapping reads the title', mapped.input.title, '映射')
 eq('the mapping reads the parent link', mapped.input.parentId, 't_parent')
 eq('the mapping keeps the creation stamp', mapped.input.createdAt, '2026-09-01T00:00:00.000Z')
 eq('the mapping reads 中 as priority 2', mapped.input.priority, 2)
 eq('a derived column is not restored', Object.keys(mapped.input).includes('状态'), false)
-eq('the natural-language recurrence is reported, not guessed', mapped.notRestored, ['重复'])
+eq('non-restorable recurrence, completion history, and follow-up labels are reported',
+  mapped.notRestored, ['重复', '完成记录', '关联跟进'])
 const unlinked = remoteRowToTask({ 标题: 'x', 父任务: '找不到的父' }, '任务ID', () => null)
 eq('an unresolvable parent is reported', unlinked.unlinkedParent, '找不到的父')
 eq('and no parentId is invented', Object.keys(unlinked.input).includes('parentId'), false)
