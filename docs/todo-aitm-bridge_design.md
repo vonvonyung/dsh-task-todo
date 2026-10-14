@@ -14,7 +14,7 @@
 
 | 角色 | 仓库 / 位置 | 版本 | 本次是否改动 |
 | --- | --- | --- | --- |
-| **待办任务** | `vonvonyung/dsh-task-todo`<br>固定分支 `arena/ef290084-dsh-task-todo` | 0.4.23 | ✅ v1 任务菜单扩展点提交 `8f702e3`；版本冲突保护 `279e744` |
+| **待办任务** | `vonvonyung/dsh-task-todo`<br>固定分支 `arena/ef290084-dsh-task-todo` | 0.4.24 | ✅ v1 任务菜单扩展点提交 `8f702e3`；版本冲突保护 `279e744` |
 | **AI 任务台** | `vonvonyung/ai-tasks-mgr`<br>分支 `arena/01a0fd0e-ai-tasks-mgr`、commit `0bfef98` | 0.3.48 | ✅ 按对应会话报告已提供 Bridge v1（`protocol: 1`）受限服务 API；尚未在真实 DSH 中验证 |
 | **桥插件** | `vonvonyung/dsh-todo-aitm-bridge`<br>分支 `arena/90610371-dsh-todo-aitm-bridge`、commit `cba9108` | 版本未注明 | ✅ 按对应会话报告已实现客户端动作、宿主路由与清单；84 项测试通过；尚无真实 DSH 端到端验证 |
 
