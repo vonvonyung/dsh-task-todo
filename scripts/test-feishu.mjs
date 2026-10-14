@@ -436,7 +436,7 @@ console.log('--- sync conflict protection uses a shared baseline, never timestam
   eq('the post-preview remote edit survives untouched', recordFor(conflictTask.id)[1]['标题'], '预览后飞书改动')
 }
 
-console.log('--- deletions are opt-in AND tombstone-gated ---')
+console.log('--- deletions are opt-in, tombstone-gated, and conflict-safe ---')
 syncStore.remove(b.id)
 // Default is OFF, so the same removal now deletes nothing from the table.
 const withoutOptIn = await sync.run({ today: T })
@@ -662,7 +662,7 @@ const autoUnknown = new TodoService(null, () => {}, {
 })
 autoUnknown.applySettings({
   dataFile: path.join(dir, 'auto-unknown.json'),
-  feishu: { enabled: true, appId: 'a', appSecret: 'b', appToken: 'c', tableId: 'd', autoSync: false },
+  feishu: { enabled: true, appId: 'a', appSecret: 'b', appToken: 'c', tableId: 'd', autoSync: false, deleteRemoved: true },
 })
 const autoUnknownStore = autoUnknown.require()
 const autoUnknownTask = autoUnknownStore.create({ id: 't_auto_unknown', title: '本地已有任务', note: '本地备注' })
@@ -670,19 +670,99 @@ autoUnknownServer.state.records.set('rec_unknown_baseline', {
   ...taskToFields(autoUnknownTask, autoUnknownStore, { today: T }),
   备注: '飞书已有的手写备注',
 })
+const autoUnknownDeleted = autoUnknownStore.create({
+  id: 't_auto_unknown_deleted', title: '无基准的本地删除', note: '本地删除时的备注',
+})
+autoUnknownServer.state.records.set('rec_unknown_deleted', {
+  ...taskToFields(autoUnknownDeleted, autoUnknownStore, { today: T }),
+  备注: '飞书删除前手写的备注',
+})
+autoUnknownStore.remove(autoUnknownDeleted.id)
 const autoUnknownAdded = autoUnknownStore.create({ id: 't_auto_unknown_new', title: '本地新增任务' })
 autoUnknown.applySettings({
   dataFile: path.join(dir, 'auto-unknown.json'),
-  feishu: { enabled: true, appId: 'a', appSecret: 'b', appToken: 'c', tableId: 'd', autoSync: true },
+  feishu: { enabled: true, appId: 'a', appSecret: 'b', appToken: 'c', tableId: 'd', autoSync: true, deleteRemoved: true },
 })
 await autoUnknown.feishuRunAuto()
 eq('without a baseline, automatic sync does not overwrite an existing Feishu field',
   autoUnknownServer.state.records.get('rec_unknown_baseline')['备注'], '飞书已有的手写备注')
 eq('without a baseline, automatic sync still creates a new local task',
   [...autoUnknownServer.state.records.values()].find((fields) => fields['任务ID'] === autoUnknownAdded.id)?.['标题'], '本地新增任务')
-eq('unknown-baseline conflict is reported instead of guessed',
-  autoUnknown.feishuStatus().lastSync.summary.skippedConflicts, 1)
+eq('without a baseline, automatic sync does not delete a remotely populated tombstone row',
+  autoUnknownServer.state.records.get('rec_unknown_deleted')['备注'], '飞书删除前手写的备注')
+eq('unknown-baseline update and deletion conflicts are reported instead of guessed',
+  autoUnknown.feishuStatus().lastSync.summary.skippedConflicts, 2)
+eq('the unknown-baseline deletion tombstone remains available for review',
+  autoUnknownStore.tombstones(), [autoUnknownDeleted.id])
 autoUnknown.dispose()
+
+// A tombstone is not permission to erase newer Feishu-side work. Even with
+// deleteRemoved enabled, a row changed since the last common state needs an
+// explicit local-push decision; auto-sync must keep it and retain the tombstone.
+const deleteConflictStore = new TodoStore({ dataFile: path.join(dir, 'delete-conflict.json'), saveDelay: 5 }).load()
+const deleteConflictTask = deleteConflictStore.create({ id: 't_delete_conflict', title: '删除冲突任务', note: '共同备注' })
+const deleteConflictServer = makeFeishuServer()
+const deleteConflictSync = new FeishuSync({ ...config, deleteRemoved: true }, deleteConflictStore, {
+  fetch: deleteConflictServer.fetch, now: fixedNow,
+})
+await deleteConflictSync.run({ today: T })
+const deleteConflictRecord = [...deleteConflictServer.state.records.entries()]
+  .find(([, fields]) => fields['任务ID'] === deleteConflictTask.id)
+deleteConflictStore.remove(deleteConflictTask.id)
+deleteConflictRecord[1]['备注'] = '飞书新写的备注'
+deleteConflictRecord[1]['飞书自定义列'] = '不能随删除丢失的内容'
+const deletePreview = await deleteConflictSync.run({ today: T, dryRun: true })
+eq('a remote edit after local deletion blocks the default plan', deletePreview.blocked, true)
+const deleteConflictChanges = deletePreview.conflicts[0]?.changes ?? []
+ok('the deletion conflict identifies a changed baseline field',
+  deleteConflictChanges.some((change) => change.field === '备注' && change.reason === 'remote'), deleteConflictChanges)
+ok('the deletion conflict also protects an untracked non-empty field',
+  deleteConflictChanges.some((change) => change.field === '飞书自定义列' && change.reason === 'unknown'), deleteConflictChanges)
+eq('a conflicted deletion is not planned', deletePreview.planned.deleted, 0)
+const deleteSkipped = await deleteConflictSync.run({ today: T, conflictPolicy: 'skip' })
+eq('skip policy preserves the remotely edited row',
+  deleteConflictServer.state.records.get(deleteConflictRecord[0]), deleteConflictRecord[1])
+eq('skip policy retains the local tombstone for a later explicit decision',
+  deleteConflictStore.tombstones(), [deleteConflictTask.id])
+eq('skip policy reports the deletion conflict', deleteSkipped.skippedConflicts, 1)
+const deletePushed = await deleteConflictSync.run({ today: T, conflictPolicy: 'push' })
+eq('the explicit local-push decision deletes the conflicted row', deletePushed.deleted, 1)
+eq('the completed deletion retires its tombstone', deleteConflictStore.tombstones(), [])
+
+const autoDeleteServer = makeFeishuServer()
+const autoDeleteLogs = []
+const autoDelete = new TodoService(null, (message) => autoDeleteLogs.push(message), {
+  fetch: autoDeleteServer.fetch, settingsFile: path.join(dir, 'auto-delete-settings.json'),
+})
+autoDelete.applySettings({
+  dataFile: path.join(dir, 'auto-delete.json'),
+  feishu: { enabled: true, appId: 'a', appSecret: 'b', appToken: 'c', tableId: 'd', autoSync: false, deleteRemoved: true },
+})
+const autoDeleteStore = autoDelete.require()
+const autoDeleteTask = autoDeleteStore.create({ id: 't_auto_delete', title: '本地后来删除的任务', note: '共同备注' })
+await autoDelete.syncFeishu({})
+const autoDeleteRecord = [...autoDeleteServer.state.records.entries()]
+  .find(([, fields]) => fields['任务ID'] === autoDeleteTask.id)
+autoDeleteRecord[1]['备注'] = '飞书新写的备注'
+autoDeleteStore.remove(autoDeleteTask.id)
+const autoAfterDeleteAdd = autoDeleteStore.create({ id: 't_auto_after_delete', title: '删除后新增任务' })
+autoDelete.applySettings({
+  dataFile: path.join(dir, 'auto-delete.json'),
+  feishu: { enabled: true, appId: 'a', appSecret: 'b', appToken: 'c', tableId: 'd', autoSync: true, deleteRemoved: true },
+})
+await autoDelete.feishuRunAuto()
+eq('adding a task cannot auto-delete a remotely edited tombstone row',
+  autoDeleteServer.state.records.get(autoDeleteRecord[0])['备注'], '飞书新写的备注')
+eq('adding a task still reaches Feishu while the deletion conflict is skipped',
+  [...autoDeleteServer.state.records.values()].find((fields) => fields['任务ID'] === autoAfterDeleteAdd.id)?.['标题'], '删除后新增任务')
+eq('automatic sync keeps the unresolved deletion tombstone',
+  autoDeleteStore.tombstones(), [autoDeleteTask.id])
+eq('automatic deletion conflict is visible in status',
+  autoDelete.feishuStatus().lastSync.summary.skippedConflicts, 1)
+ok('automatic deletion conflict is explained in the host log',
+  autoDeleteLogs.some((message) => message.includes('（本地已删除）') && message.includes('飞书新写的备注')),
+  autoDeleteLogs)
+autoDelete.dispose()
 
 // ---------------------------------------------------------------------------
 // the setup and diagnosis surface: test / fields / reconcile / pull

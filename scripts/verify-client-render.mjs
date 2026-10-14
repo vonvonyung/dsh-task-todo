@@ -901,6 +901,16 @@ ok('the current disposer removes its own registration',
     conflictText.includes('未写入远端') && conflictText.includes('本地标题') && conflictText.includes('飞书标题'), conflictText)
   ok('the conflict report does not truncate later differing fields',
     conflictText.includes('本地优先级') && conflictText.includes('飞书优先级'), conflictText)
+  const deleteConflictText = builders.syncLines({
+    blocked: true, local: 0, remote: 1, conflicts: [{
+      key: 't_deleted', title: '已删除任务', operation: 'delete', changes: [
+        { field: '备注', local: '（本地已删除）', remote: '飞书新备注', reason: 'remote' },
+      ],
+    }], unmanaged: 0,
+  }).join(' / ')
+  ok('the conflict report distinguishes a deletion conflict and tells how to keep the row',
+    deleteConflictText.includes('删除冲突') && deleteConflictText.includes('从飞书补洞')
+    && deleteConflictText.includes('飞书新备注'), deleteConflictText)
 
   const applyRemoteText = builders.applyRemoteLines({
     dryRun: true, matched: 1, differing: 1, planned: 1, updated: 0, updatedFields: 0,
