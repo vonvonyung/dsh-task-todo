@@ -568,6 +568,34 @@ const React = makeReact(realReact)
 const registrations = []
 const requireCalls = []
 const layoutCalls = []
+const composerState = { draft: '', draftRev: 0, phase: 'plain' }
+const composerListeners = new Set()
+let composerFocusCount = 0
+let composerSubmitCount = 0
+const fakeSessionInput = {
+  state: {
+    getSnapshot: () => composerState,
+    subscribe(listener) { composerListeners.add(listener); return () => composerListeners.delete(listener) },
+  },
+  focus() { composerFocusCount++ },
+}
+const fakeInputActions = {
+  captureInsertion() {
+    return { start: composerState.draft.length, end: composerState.draft.length, draftRev: composerState.draftRev }
+  },
+  insertText(text, span) {
+    if (composerState.phase !== 'plain' || span?.draftRev !== composerState.draftRev) return false
+    composerState.draft = composerState.draft.slice(0, span.start) + text + composerState.draft.slice(span.end)
+    composerState.draftRev++
+    for (const listener of [...composerListeners]) listener()
+    return true
+  },
+  setDraft(text) { composerState.draft = text; composerState.draftRev++ },
+  submit() { composerSubmitCount++ },
+}
+const fakeBinding = { ctx: { sessionId: 'test-session' } }
+const fakeSessions = { binding: (id) => id === 'test-session' ? fakeBinding : undefined }
+const fakeConversation = { input: { for: (actx) => actx === fakeBinding.ctx ? fakeSessionInput : undefined } }
 const slotsStub = {
   // The real service runs the callback synchronously when the declaration
   // already exists; every seat this plugin uses is a built-in, so it exists.
@@ -588,6 +616,8 @@ const ctx = {
   effect: (fn) => { const dispose = fn(); return typeof dispose === 'function' ? dispose : () => {} },
   get: (key) => {
     if (key === 'slots') return slotsStub
+    if (key === 'sessions') return fakeSessions
+    if (key === 'conversation') return fakeConversation
     if (key === 'layout') {
       return {
         selectPanel(id) {
@@ -710,9 +740,8 @@ function registerTestBridgeActions() {
   }))
 }
 // Simulate a consumer bundle that starts before the todo bundle: it listens for
-// the owner API, then registers when the owner announces readiness. Keep these
-// event methods scoped to factory initialization so unrelated window-dependent
-// client effects retain the harness's original environment.
+// the owner API, then registers when the owner announces readiness. The same
+// minimal event surface also drives composer-availability updates in open menus.
 sandbox.window.addEventListener = (type, listener) => {
   if (!windowListeners.has(type)) windowListeners.set(type, new Set())
   windowListeners.get(type).add(listener)
@@ -720,8 +749,6 @@ sandbox.window.addEventListener = (type, listener) => {
 sandbox.window.removeEventListener = (type, listener) => windowListeners.get(type)?.delete(listener)
 sandbox.window.addEventListener('dsh-todo-task-actions-ready', registerTestBridgeActions)
 const plugin = definition.factory(sandbox.require)
-delete sandbox.window.addEventListener
-delete sandbox.window.removeEventListener
 ok('the factory returns a plugin with a name and apply()',
   typeof plugin?.name === 'string' && typeof plugin?.apply === 'function')
 ok('the plugin declares the slots dependency', Array.isArray(plugin.inject) && plugin.inject.includes('slots'), plugin.inject)
@@ -755,6 +782,7 @@ const sampleActions = taskActionsApi.forTask({ id: 't_test', title: '核对接�
 eq('actions are sorted and unavailable actions stay visible but disabled',
   sampleActions.map(({ id, label, order, enabled, disabledReason }) => ({ id, label, order, enabled, disabledReason })),
   [
+    { id: 'todo.copy-to-dsh-chat', label: '复制到dsh对话', order: 90, enabled: false, disabledReason: '当前没有可用的 DSH 对话输入框' },
     { id: 'verify.unavailable', label: 'AI 任务台未运行', order: 150, enabled: false, disabledReason: '请先打开 AI 任务台' },
     { id: 'verify.sample', label: '外部动作：核对接口', order: 200, enabled: true, disabledReason: '' },
   ])
@@ -826,9 +854,9 @@ ok('the current disposer removes its own registration',
 }
 
 const seat = (key) => registrations.find((r) => r.key === key)
-eq('four seats were registered, one per slot',
+eq('four UI seats plus the hidden DSH input bridge were registered',
   registrations.map((r) => r.key).sort(),
-  ['main', 'settings.section', 'shell.overlay', 'sidebar.panellist'])
+  ['conversation.input.left', 'main', 'settings.section', 'shell.overlay', 'sidebar.panellist'])
 ok('every seat registered a component function',
   registrations.every((r) => typeof r.Component === 'function'))
 // The user asked for the panel entry to sit with the global panels, between
@@ -1246,7 +1274,8 @@ await ui.settle()
 let extensionMenu = ui.byClass('td-pop').find((node) => ui.text(node).includes('外部动作：没有日期的想法'))
 ok('the task menu contains the registered extension', extensionMenu !== undefined)
 let extensionButtons = extensionMenu?.children.filter((node) => node.tag === 'button' && node.props.className === 'td-task-action') ?? []
-eq('extension actions are ordered by their declared order', extensionButtons.map((node) => ui.text(node)), [
+eq('task actions are ordered by their declared order', extensionButtons.map((node) => ui.text(node)), [
+  '复制到dsh对话（当前没有可用的 DSH 对话输入框）',
   'AI 任务台未运行（请先打开 AI 任务台）',
   '外部动作：没有日期的想法',
 ])
@@ -1257,12 +1286,16 @@ const deleteActionIndex = menuButtonLabels.indexOf('删除任务')
 ok('extension actions follow list destinations and precede delete',
   firstActionIndex > -1 && deleteActionIndex > menuButtonLabels.indexOf('外部动作：没有日期的想法')
   && menuButtonLabels.indexOf('收集箱') < firstActionIndex)
-const unavailableButton = extensionButtons[0]
-ok('an unavailable action is visibly disabled with an explanation',
+const copyWithoutComposer = extensionButtons[0]
+ok('copy-to-chat is visibly disabled when no DSH composer is mounted',
+  copyWithoutComposer?.props.disabled === true
+  && copyWithoutComposer?.props.title === '当前没有可用的 DSH 对话输入框')
+const unavailableButton = extensionButtons[1]
+ok('an unavailable extension action is visibly disabled with an explanation',
   unavailableButton?.props.disabled === true && unavailableButton?.props.title === '请先打开 AI 任务台')
 await unavailableButton?.props.onClick({})
 ok('a disabled action cannot run', disabledActionRunCount === 0)
-const sampleActionButton = extensionButtons[1]
+const sampleActionButton = extensionButtons[2]
 await sampleActionButton?.props.onClick({})
 await ui.settle()
 ok('the registered action received the selected live task snapshot',
@@ -1293,6 +1326,81 @@ ok('mutations return only a frozen task snapshot, never the full view state',
   && Object.isFrozen(scopedUpdateResult))
 ok('a returned status string is announced to the user', ui.text().includes('外部动作已运行'))
 ok('the task menu closes after the action', ui.byClass('td-pop').length === 0)
+
+// The copy action is present in both task surfaces and uses the public Session
+// input API. Its note payload remains multiline, and no submit is triggered.
+await api('update', { id: undated.created.id, note: '第一行备注\n第二行备注' })
+const reloadTodo = ui.byClass('td-icon').find((node) => node.props['aria-label'] === '重新载入')
+reloadTodo?.props.onClick({})
+await ui.settle()
+ui.byClass('td-side').find((node) => ui.text(node) === '列表')?.props.onClick({})
+await ui.settle()
+const listTaskRow = ui.byClass('td-row').find((node) => ui.text(node).includes('没有日期的想法'))
+const listTaskMenuTrigger = ui.tag('button').find((node) =>
+  node.props.title === '更多任务操作' && listTaskRow?.contains(node))
+listTaskMenuTrigger?.props.onClick({
+  stopPropagation() {}, currentTarget: { getBoundingClientRect: () => ({ bottom: 100, left: 240 }) },
+})
+await ui.settle()
+const listCopyButton = ui.byClass('td-pop').flatMap((node) => node.children)
+  .find((node) => node.tag === 'button' && node.props.className === 'td-task-action'
+    && ui.text(node).startsWith('复制到dsh对话'))
+ok('the list task menu includes copy-to-DSH', listCopyButton !== undefined)
+ok('copy-to-DSH explains that no composer is currently available',
+  listCopyButton?.props.disabled === true
+  && listCopyButton?.props.title === '当前没有可用的 DSH 对话输入框')
+const listMenuCancel = ui.byClass('td-pop').flatMap((node) => node.children)
+  .find((node) => node.tag === 'button' && ui.text(node) === '取消')
+listMenuCancel?.props.onClick({})
+await ui.settle()
+
+ui.clickable(ui.find('看板')).props.onClick({})
+await ui.settle()
+openExtensionMenu()
+await ui.settle()
+const boardCopyBeforeBridge = ui.byClass('td-pop').flatMap((node) => node.children)
+  .find((node) => node.tag === 'button' && node.props.className === 'td-task-action'
+    && ui.text(node).startsWith('复制到dsh对话'))
+ok('the board task menu also includes copy-to-DSH before a composer is mounted',
+  boardCopyBeforeBridge?.props.disabled === true)
+const composerBridgeEntry = registrations.find((entry) =>
+  entry.key === 'conversation.input.left' && entry.options.id === 'todo-copy-to-dsh-chat-bridge')
+ok('the hidden bridge registers in DSH’s session-scoped composer slot', composerBridgeEntry !== undefined)
+const composerBridgeRoot = createRoot().api
+if (composerBridgeEntry !== undefined) {
+  const composerBridgeProps = composerBridgeEntry.options.inject('test-session') ?? {}
+  composerBridgeRoot.render(React.createElement(composerBridgeEntry.Component, {
+    sessionId: 'test-session', inputActions: fakeInputActions, ...composerBridgeProps,
+  }))
+}
+await ui.settle()
+const boardCopyButton = ui.byClass('td-pop').flatMap((node) => node.children)
+  .find((node) => node.tag === 'button' && node.props.className === 'td-task-action'
+    && ui.text(node).startsWith('复制到dsh对话'))
+ok('composer availability enables the open board-menu action',
+  boardCopyButton?.props.disabled === false)
+await boardCopyButton?.props.onClick({})
+await ui.settle()
+eq('copy-to-DSH inserts the title and the complete multiline note', composerState.draft,
+  '没有日期的想法\n\n第一行备注\n第二行备注')
+ok('copy-to-DSH returns focus to the DSH composer', composerFocusCount === 1)
+ok('copy-to-DSH fills the composer without submitting', composerSubmitCount === 0)
+ok('copy-to-DSH reports that the text was filled but not sent',
+  ui.text().includes('已填入当前 DSH 对话输入框（未发送）'))
+
+composerState.draft = '已有草稿'
+composerState.draftRev++
+for (const listener of [...composerListeners]) listener()
+openExtensionMenu()
+await ui.settle()
+const copyWithExistingDraft = ui.byClass('td-pop').flatMap((node) => node.children)
+  .find((node) => node.tag === 'button' && node.props.className === 'td-task-action'
+    && ui.text(node).startsWith('复制到dsh对话'))
+await copyWithExistingDraft?.props.onClick({})
+await ui.settle()
+eq('copy-to-DSH preserves existing unsent text and separates the copied task', composerState.draft,
+  '已有草稿\n\n没有日期的想法\n\n第一行备注\n第二行备注\n\n')
+ok('copying a task never submits it, including when appending', composerSubmitCount === 0)
 
 // Registering and disposing an action while a menu is open updates the menu
 // without requiring the user to close and reopen it.
