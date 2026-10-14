@@ -85,7 +85,7 @@
 
 #### 界面风格（v0.4.23）
 
-面板标题右侧的「界面风格设置」可以即时切换，两种风格都会自动保存在本机；也可以在「设置 → 待办任务」里编辑。默认是「简洁扁平」。版本号按 `x.y.zz` 递增，本版为 `0.4.24`。
+面板标题右侧的「界面风格设置」可以即时切换，两种风格都会自动保存在本机；也可以在「设置 → 待办任务」里编辑。默认是「简洁扁平」。版本号按 `x.y.zz` 递增，本版为 `0.4.25`。
 
 - **简洁扁平**：黑白与中性灰打底，鲜明蓝 `#145df0` 用于主操作、选中与聚焦；压低圆角、减掉阴影，侧栏选中项不再加左边框。沿用现有任务布局。
 - **杂志编辑**：深色侧栏、蓝灰强调色 `#496f89`、衬线标题与细分隔线；保留编辑式层级，但不加装饰性大标题或统计展板，常用视图、搜索和任务操作仍在手边。
@@ -110,7 +110,7 @@ error: profile "desktop" is managed exclusively by the Electron application
 ```
 
 所以请在**桌面版应用内**安装：设置 → 插件（市场）→ 添加插件，填
-`github:vonvonyung/dsh-task-todo#v0.4.24`（固定到本次发布）；也可以指向本地目录或本地产出的 `.tgz`。
+`github:vonvonyung/dsh-task-todo#v0.4.25`（固定到本次发布）；也可以指向本地目录或本地产出的 `.tgz`。
 装完**完全退出并重启桌面版**（bundle 层只在启动时读取；桌面版用自己的窗口加载客户端
 bundle，不需要像浏览器那样 `Ctrl+F5`）。卸载同样在应用内的插件管理器里做。
 
@@ -120,7 +120,7 @@ bundle，不需要像浏览器那样 `Ctrl+F5`）。卸载同样在应用内的�
 
 ```sh
 # 安装本次 GitHub Release（固定版本）
-dsh plugin --profile web add "github:vonvonyung/dsh-task-todo#v0.4.24"
+dsh plugin --profile web add "github:vonvonyung/dsh-task-todo#v0.4.25"
 
 # 从 npm 安装（npm 包发布后可用；目前尚未发布到 npm）
 dsh plugin --profile web add dsh-task-todo
