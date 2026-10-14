@@ -142,8 +142,12 @@ function createRoot() {
       // attaching a ref and asking whether a click landed inside its own row.
       tagName: typeof type === 'string' ? String(type).toUpperCase() : '',
       props: node.props ?? {},
-      // React 19 moved `ref` into props; reading `element.ref` warns.
-      ref: node.props?.ref ?? null,
+      // React 19 moved `ref` into props; in React 18 it remains on the element.
+      // Only read the legacy property on React versions where it is still public,
+      // avoiding React 19's deprecation getter warning.
+      ref: Number.parseInt(realReact.version, 10) >= 19
+        ? (node.props?.ref ?? null)
+        : (node.ref ?? null),
       parent: null,
       children: list.flatMap((child, i) => {
         const walked = walk(child, `${pathArg}/${i}`)
@@ -653,6 +657,26 @@ const testWindow = {
     return true
   },
 }
+const uiFeishuMock = { enabled: false, syncCalls: [], applyCalls: [], syncPreview: null, syncActual: null, applyPreview: null, applyActual: null }
+const nativeFetch = globalThis.fetch
+async function browserFetch(url, init) {
+  const pathname = new URL(String(url), BASE).pathname
+  const respond = (data) => new Response(JSON.stringify({ ok: true, data }), {
+    status: 200, headers: { 'content-type': 'application/json; charset=utf-8' },
+  })
+  if (uiFeishuMock.enabled && pathname === '/todo/api/syncFeishu') {
+    const args = JSON.parse(init?.body ?? '{}')
+    uiFeishuMock.syncCalls.push(args)
+    return respond(args.dryRun === true ? uiFeishuMock.syncPreview : uiFeishuMock.syncActual)
+  }
+  if (uiFeishuMock.enabled && pathname === '/todo/api/feishuApplyRemote') {
+    const args = JSON.parse(init?.body ?? '{}')
+    uiFeishuMock.applyCalls.push(args)
+    return respond(args.dryRun === true ? uiFeishuMock.applyPreview : uiFeishuMock.applyActual)
+  }
+  return nativeFetch(String(url).startsWith('http') ? url : BASE + url, init)
+}
+
 const sandbox = {
   window: testWindow,
   Event: HarnessEvent,
@@ -689,7 +713,7 @@ const sandbox = {
   parseFloat,
   // The client calls a RELATIVE url (as a browser does); in Node that needs the
   // loopback base in front of it.
-  fetch: (url, init) => fetch(String(url).startsWith('http') ? url : BASE + url, init),
+  fetch: browserFetch,
   require: (id) => {
     requireCalls.push(id)
     if (id === 'react') return React
@@ -845,12 +869,53 @@ ok('the current disposer removes its own registration',
 
   const reconcileText = builders.reconcileLines({
     local: 2, remote: 4, keyed: 4, unkeyed: 0, identical: 1,
-    differing: [{ key: 't_a', title: 'A', fields: ['标题'] }],
+    differing: [{
+      key: 't_a', title: 'A', fields: ['标题'],
+      changes: [
+        { field: '标题', local: '本地标题', remote: '飞书标题', direction: 'both' },
+        { field: '备注', local: '本地备注', remote: '飞书备注', direction: 'both' },
+        { field: '状态', local: '本地状态', remote: '飞书状态', direction: 'both' },
+        { field: '优先级', local: '本地优先级', remote: '飞书优先级', direction: 'both' },
+        { field: '父任务', local: '本地父项', remote: '飞书父项', direction: 'both' },
+      ],
+    }],
     localOnly: [{ key: 't_b', title: 'B' }], remoteOnly: [{ key: 't_c', title: 'C' }],
     columns: { present: [], missing: [] }, keyField: '任务ID',
   }).join(' / ')
   ok('the reconcile report never says undefined', !reconcileText.includes('undefined'), reconcileText)
   ok('and it points at the pull for remote-only rows', reconcileText.includes('从飞书补洞'), reconcileText)
+  ok('the reconcile report includes both values and the conflict direction',
+    reconcileText.includes('本地标题') && reconcileText.includes('飞书标题') && reconcileText.includes('两端变更'), reconcileText)
+  ok('the complete matching-row report does not truncate later differing fields',
+    reconcileText.includes('父任务') && reconcileText.includes('飞书父项'), reconcileText)
+
+  const conflictText = builders.syncLines({
+    blocked: true, local: 1, remote: 1, conflicts: [{ key: 't_a', title: 'A', changes: [
+      { field: '标题', local: '本地标题', remote: '飞书标题', reason: 'both' },
+      { field: '备注', local: '本地备注', remote: '飞书备注', reason: 'both' },
+      { field: '状态', local: '本地状态', remote: '飞书状态', reason: 'both' },
+      { field: '优先级', local: '本地优先级', remote: '飞书优先级', reason: 'both' },
+    ] }], unmanaged: 0,
+  }).join(' / ')
+  ok('the blocked-sync report includes values and prevents silent overwrite',
+    conflictText.includes('未写入远端') && conflictText.includes('本地标题') && conflictText.includes('飞书标题'), conflictText)
+  ok('the conflict report does not truncate later differing fields',
+    conflictText.includes('本地优先级') && conflictText.includes('飞书优先级'), conflictText)
+
+  const applyRemoteText = builders.applyRemoteLines({
+    dryRun: true, matched: 1, differing: 1, planned: 1, updated: 0, updatedFields: 0,
+    previewToken: 'preview-token', items: [{ key: 't_a', title: 'A', changes: [
+      { field: '标题', local: '本地标题', remote: '飞书标题', applied: true, reason: '' },
+      { field: '备注', local: '本地备注', remote: '飞书备注', applied: true, reason: '' },
+      { field: '状态', local: '本地状态', remote: '飞书状态', applied: false, reason: '派生字段' },
+      { field: '重复', local: '本地规则', remote: '飞书规则', applied: false, reason: '摘要文本' },
+      { field: '优先级', local: '中', remote: '高', applied: true, reason: '' },
+    ] }], skipped: [], notApplied: ['重复'], missingColumns: [], createdLists: [],
+  }).join(' / ')
+  ok('the apply-remote preview shows the field values and requires confirmation',
+    applyRemoteText.includes('本地标题') && applyRemoteText.includes('飞书标题') && applyRemoteText.includes('预览'), applyRemoteText)
+  ok('the apply-remote preview exposes all changed fields, including later supported/unsupported ones',
+    applyRemoteText.includes('飞书规则') && applyRemoteText.includes('优先级：中 → 高'), applyRemoteText)
 
   const pullText = builders.pullLines({
     dryRun: true, planned: 1, created: 0, remote: 4, holes: 1,
@@ -3108,7 +3173,7 @@ ok('the sync buttons exist unclicked',
 // The Feishu action row, in the order the work is actually done. These are the
 // buttons a user clicks BEFORE anything is configured, so their absence -- or a
 // crash on click -- is the entire first-run experience.
-for (const label of ['测试连接', '补全字段', '预览同步', '完整对账', '从飞书补洞（预览）', '从飞书补洞']) {
+for (const label of ['测试连接', '补全字段', '预览同步', '立即同步', '完整对账', '从飞书更新本地（预览）', '从飞书补洞（预览）', '从飞书补洞']) {
   ok(`the settings page offers ${label}`,
     ui.byClass('td-set-btn').some((n) => ui.text(n) === label),
     ui.byClass('td-set-btn').map((n) => ui.text(n)))
@@ -3174,6 +3239,78 @@ const secondForm = await api('settings')
 eq('the second save applied', secondForm.values.feishu.appId, 'cli_second_edit')
 eq('and kept the secret', secondForm.secretSet, true)
 eq('and kept the switch', secondForm.values.feishu.enabled, true)
+
+// Exercise the real settings-page decision flow with only the Feishu network
+// responses mocked; the settings and state calls still use the real host HTTP API.
+uiFeishuMock.enabled = true
+uiFeishuMock.syncPreview = {
+  blocked: true, stale: false, dryRun: true, local: 1, remote: 1, unchanged: 0,
+  planned: { created: 0, updated: 0, deleted: 0 }, created: 0, updated: 0, deleted: 0,
+  unmanaged: 0, prune: false, skippedConflicts: 0, conflictPolicy: 'stop',
+  previewToken: 'sync-preview-token',
+  conflicts: [{ key: 't_ui', title: '界面测试', fields: ['标题'], changes: [
+    { field: '标题', local: '本地标题', remote: '飞书标题', reason: 'both' },
+  ] }],
+}
+await press('立即同步')
+ok('a conflict report is shown before any sync write',
+  ui.text().includes('本地标题') && ui.text().includes('飞书标题'), ui.text().slice(-500))
+eq('the immediate-sync preflight made no write call', uiFeishuMock.syncCalls.map((args) => args.dryRun), [true])
+ok('the conflict decision offers explicit remote-import and local-push choices',
+  ui.byClass('td-set-btn').some((node) => ui.text(node) === '按飞书更新本地（先预览）')
+  && ui.byClass('td-set-btn').some((node) => ui.text(node) === '按本地覆盖飞书'))
+uiFeishuMock.applyPreview = {
+  keyField: '任务ID', remote: 1, matched: 1, differing: 1, planned: 1,
+  updated: 0, updatedFields: 0, items: [{ key: 't_ui', title: '界面测试', changes: [
+    { field: '标题', local: '本地标题', remote: '飞书标题', applied: true, reason: '' },
+  ] }], skipped: [], notApplied: [], missingColumns: [], createdLists: [],
+  dryRun: true, previewToken: 'remote-preview-token',
+}
+uiFeishuMock.applyActual = {
+  keyField: '任务ID', remote: 1, matched: 1, differing: 1, planned: 1,
+  updated: 1, updatedFields: 1, items: [{ key: 't_ui', title: '界面测试', changes: [
+    { field: '标题', local: '本地标题', remote: '飞书标题', applied: true, reason: '' },
+  ] }], skipped: [], notApplied: [], missingColumns: [], createdLists: [],
+  dryRun: false, previewToken: 'remote-preview-token',
+}
+await press('按飞书更新本地（先预览）')
+ok('the reverse-import preview asks for an explicit confirmation',
+  ui.byClass('td-set-btn').some((node) => ui.text(node) === '确认应用以上预览'))
+ok('the preview report shows both sides',
+  ui.text().includes('本地标题') && ui.text().includes('飞书标题'), ui.text().slice(-500))
+await press('确认应用以上预览')
+eq('the preview and confirmation requests are separate, and confirmation carries the token',
+  uiFeishuMock.applyCalls, [{ dryRun: true }, { previewToken: 'remote-preview-token' }])
+eq('the confirmation request includes the preview token', uiFeishuMock.applyCalls.at(-1)?.previewToken, 'remote-preview-token')
+eq('confirmed import ends with a completion report', ui.text().includes('已更新 1 项'), true)
+
+uiFeishuMock.syncActual = {
+  blocked: false, stale: false, dryRun: false, local: 1, remote: 1, unchanged: 0,
+  planned: { created: 0, updated: 1, deleted: 0 }, created: 0, updated: 1, deleted: 0,
+  unmanaged: 0, prune: false, skippedConflicts: 0, conflictPolicy: 'push', conflicts: [],
+}
+await press('立即同步')
+await press('按本地覆盖飞书')
+ok('the explicit local-push choice confirms the preview token and policy',
+  uiFeishuMock.syncCalls.at(-1)?.conflictPolicy === 'push'
+  && uiFeishuMock.syncCalls.at(-1)?.expectedToken === 'sync-preview-token', uiFeishuMock.syncCalls)
+
+uiFeishuMock.syncActual = {
+  blocked: false, stale: false, dryRun: false, local: 1, remote: 1, unchanged: 0,
+  planned: { created: 0, updated: 0, deleted: 0 }, created: 0, updated: 0, deleted: 0,
+  unmanaged: 0, prune: false, skippedConflicts: 1, conflictPolicy: 'skip',
+  conflicts: [{ key: 't_ui', title: '界面测试', changes: [
+    { field: '标题', local: '本地标题', remote: '飞书标题', reason: 'both' },
+  ] }],
+}
+await press('立即同步')
+await press('跳过冲突并同步安全项')
+ok('the explicit skip choice confirms the snapshot and skip policy',
+  uiFeishuMock.syncCalls.at(-1)?.conflictPolicy === 'skip'
+  && uiFeishuMock.syncCalls.at(-1)?.expectedToken === 'sync-preview-token', uiFeishuMock.syncCalls)
+ok('the skip result visibly reports the skipped conflict values',
+  ui.text().includes('本地标题') && ui.text().includes('飞书标题'), ui.text().slice(-500))
+uiFeishuMock.enabled = false
 
 // ===========================================================================
 // summary
