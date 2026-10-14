@@ -61,12 +61,48 @@ ok('a missing parent is refused', (() => {
 })())
 
 console.log('--- completion ---')
-const done = store.toggle(report.id)
+const done = store.toggle(report.id, { completionSummary: '已完成报告初稿，数据表已校对。' })
 ok('one-shot task becomes done', done.done === true)
 ok('completedAt is stamped', typeof done.completedAt === 'string' && done.completedAt.length > 10)
+ok('completion summary is recorded with a timestamp',
+  done.completionRecords.length === 1
+  && done.completionRecords[0].summary === '已完成报告初稿，数据表已校对。'
+  && done.completionRecords[0].at === done.completedAt)
 ok('subtasks are NOT auto-completed', store.childrenOf(report.id).every((c) => !c.done))
-ok('un-completing clears the stamp', store.toggle(report.id).completedAt === null)
-store.toggle(report.id)
+const reopened = store.toggle(report.id)
+ok('un-completing clears the current stamp but keeps prior completion records',
+  reopened.completedAt === null && reopened.completionRecords.length === 1)
+const completedAgain = store.toggle(report.id, { completionSummary: '' })
+ok('completion summary may be skipped and a later completion is appended',
+  completedAgain.completionRecords.length === 2 && completedAgain.completionRecords[1].summary === '')
+
+const copyrightApplication = store.create({
+  title: '整理并上报软著申请', due: T, priority: 2, tags: ['软著', '审批'],
+})
+const submitted = store.toggle(copyrightApplication.id, {
+  today: T,
+  completionSummary: '材料已整理并提交，等待审批。',
+  followUp: { title: '跟进软著申请审批进度', due: '2026-10-17' },
+})
+const submittedRecord = submitted.completionRecords.at(-1)
+const approvalFollowUp = store.get(submittedRecord.followUpTaskId)
+ok('a completed action stores its summary and remains completed',
+  submitted.done === true && submittedRecord.summary === '材料已整理并提交，等待审批。')
+ok('follow-up is a separate open top-level task with its own due date',
+  approvalFollowUp !== null && approvalFollowUp.done === false
+  && approvalFollowUp.parentId === null && approvalFollowUp.due === '2026-10-17')
+ok('follow-up links back to the source and inherits its list context',
+  approvalFollowUp.followUpOf === submitted.id
+  && approvalFollowUp.listId === submitted.listId
+  && approvalFollowUp.priority === submitted.priority
+  && JSON.stringify(approvalFollowUp.tags) === JSON.stringify(submitted.tags))
+eq('the completion record points to its linked follow-up',
+  submittedRecord.followUpTaskId, approvalFollowUp.id)
+const invalidFollowUp = store.create({ title: '验证跟进任务校验', due: T })
+ok('invalid follow-up data refuses completion without changing the source', (() => {
+  try { store.toggle(invalidFollowUp.id, { followUp: { title: '', due: '2026-10-17' } }); return false }
+  catch { return !store.get(invalidFollowUp.id).done && store.get(invalidFollowUp.id).completionRecords.length === 0 }
+})())
 
 console.log('--- repeating tasks roll instead of completing ---')
 const daily = store.create({ title: '每日站会', due: '2026-09-10', recurrence: { freq: 'daily' } })
@@ -208,6 +244,15 @@ const kidB = store.addSubtask(kidA.id, { title: '孙1' })
 const removed = store.remove(withKids.id)
 eq('the whole subtree goes', removed.deleted, 3)
 ok('and is really gone', store.get(kidB.id) === null)
+const linkedSourceForDelete = store.create({ title: '删除跟进记录测试', due: T })
+const linkedSourceDone = store.toggle(linkedSourceForDelete.id, {
+  followUp: { title: '将被删除的跟进任务', due: '2026-10-17' },
+})
+const linkedTaskId = linkedSourceDone.completionRecords.at(-1).followUpTaskId
+store.remove(linkedTaskId)
+ok('deleting a follow-up clears the source record link',
+  store.get(linkedSourceForDelete.id).completionRecords.at(-1).followUpTaskId === null)
+store.remove(linkedSourceForDelete.id)
 
 console.log('--- quick add through the store ---')
 const quick = store.quickAdd('明天 15:00 交周报 !高 #新清单 @紧要', { today: T })
@@ -309,6 +354,11 @@ const dirty = normalizeTask({
   id: 't_dirty', title: 42, note: { a: 1 }, done: 'yes', priority: 99, order: Number.NaN,
   tags: ['ok', '', null, 5], due: '2026-02-30', start: new Date(), parentId: '', recurrence: { freq: 'nope' },
   history: [{ at: 1 }, { at: '2026-01-01T00:00:00', due: '2026-01-01' }, 'junk'],
+  completionRecords: [
+    { at: '2026-01-01T12:30:00', summary: 5, followUpTaskId: 42 },
+    { summary: 'missing timestamp' },
+  ],
+  followUpOf: '',
   skipped: ['2026-01-01', 'bogus'], completedAt: undefined, completedCount: -5,
 }, [{ id: 'l_inbox', name: '收集箱' }])
 eq('title is stringified', dirty.title, '42')
@@ -322,6 +372,10 @@ eq('a Date instance never survives', typeof dirty.start === 'string' && dirty.st
 eq('empty parentId becomes null', dirty.parentId, null)
 eq('a bad rule becomes null', dirty.recurrence, null)
 eq('history keeps only usable entries', dirty.history.length, 1)
+eq('completion records are normalized and malformed entries are dropped', dirty.completionRecords, [
+  { at: '2026-01-01T12:30:00', summary: '5', followUpTaskId: '42' },
+])
+eq('empty followUpOf becomes null', dirty.followUpOf, null)
 eq('skipped drops garbage', dirty.skipped, ['2026-01-01'])
 eq('undefined completedAt becomes null', dirty.completedAt, null)
 eq('negative counts clamp to 0', dirty.completedCount, 0)
@@ -337,6 +391,11 @@ ok('reload keeps every task', reloaded.tasks.length === store.tasks.length, `${r
 ok('reload keeps subtask links', reloaded.get(s1.id).parentId === report.id)
 ok('reload keeps recurrence rules', reloaded.get(monthly.id).recurrence.freq === 'monthly')
 ok('reload keeps the series anchor', reloaded.get(monthly.id).seriesAnchor === '2026-01-31')
+ok('reload keeps completion summaries',
+  reloaded.get(report.id).completionRecords[0].summary === '已完成报告初稿，数据表已校对。')
+ok('reload keeps follow-up links in both directions',
+  reloaded.get(copyrightApplication.id).completionRecords.at(-1).followUpTaskId === approvalFollowUp.id
+  && reloaded.get(approvalFollowUp.id).followUpOf === copyrightApplication.id)
 ok('reload keeps lists', reloaded.lists.length === store.lists.length)
 eq('reload keeps the list order the user dragged',
   reloaded.lists.map((l) => l.name), store.lists.map((l) => l.name))
@@ -383,6 +442,7 @@ eq('sortTasks puts done last', sortTasks([
 const view = taskView(store.get(report.id), store, { today: T })
 ok('taskView reports the subtask tally', view.subtaskTotal === 2)
 ok('taskView reports the parent title for a child', taskView(store.get(s1.id), store, { today: T }).parentTitle === '交季度报告')
+ok('taskView exposes completion records', Array.isArray(view.completionRecords) && view.completionRecords.length === 2)
 ok('taskView is JSON-safe', JSON.stringify(view) === JSON.stringify(JSON.parse(JSON.stringify(view))))
 eq('parseQuickAdd is re-exported for callers', typeof parseQuickAdd, 'function')
 eq('normalizeRecurrence is re-exported by the store module', normalizeRecurrence({ freq: 'daily' }).ok, true)
@@ -399,8 +459,10 @@ const toClear = store.tasks.find((t) => t.title === '待清理')
 store.addSubtask(toClear.id, { title: '子任务也走' })
 store.toggle(toClear.id, { today: T })
 const cleared = store.clearCompleted()
-ok('clearCompleted removes every done group and its subtasks', cleared.deleted === 7, cleared.deleted)
+ok('clearCompleted removes every done group and its subtasks', cleared.deleted === 8, cleared.deleted)
 ok('and leaves open tasks alone', store.tasks.some((t) => t.title === '每日站会' && !t.done))
+ok('a surviving follow-up is detached when its completed source is cleared',
+  store.get(approvalFollowUp.id)?.followUpOf === null)
 
 console.log('--- create() dates: the two ends default as a PAIR, not one at a time ---')
 // The bug this locks down: `start` used to fall back to the creation day on its

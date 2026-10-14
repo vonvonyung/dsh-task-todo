@@ -1105,21 +1105,87 @@ section('toggling reaches the host')
 
 const beforeToggle = (await api('state', { view: 'list', filter: 'all' })).tasks.find((t) => t.id === undated.created.id)
 ok('the undated task starts open', beforeToggle.done === false)
-const row = ui.find('没有日期的想法')
 const tickIt = ui.clickable(ui.byClass('td-row').find((n) => ui.text(n).includes('没有日期的想法')))
 ok('the row exposes a click target', tickIt !== undefined)
-const checkbox = ui.byClass('td-chk').find((n) => n.parent !== null && ui.text(n.parent).includes('没有日期的想法'))
-ok('the row has its own checkbox', checkbox !== undefined)
-checkbox.props.onClick({ stopPropagation() {} })
+const checkbox = () => ui.byClass('td-chk').find((n) => n.parent !== null && ui.text(n.parent).includes('没有日期的想法'))
+ok('the row has its own checkbox', checkbox() !== undefined)
+checkbox().props.onClick({ stopPropagation() {} })
 await ui.settle()
-const afterToggle = (await api('state', { view: 'list', filter: 'all', includeDone: true })).tasks.find((t) => t.id === undated.created.id)
-ok('clicking the checkbox completed the task in the real store', afterToggle.done === true, afterToggle.done)
-
-// Put it back so later assertions stay simple.
-checkbox.props.onClick({ stopPropagation() {} })
-await ui.settle()
-ok('clicking again reopens it',
+const completionDialog = () => overlay.byClass('td-modal').find((node) => node.props['aria-label'] === '完成任务')
+ok('checking an open task opens the completion form', completionDialog() !== undefined)
+ok('the completion note is optional',
+  overlay.tag('textarea').some((node) => node.props['aria-label'] === '完成情况'
+    && String(node.props.placeholder).includes('留空也可以完成')))
+ok('the task stays open until the completion form is submitted',
   (await api('state', { view: 'list', filter: 'all', includeDone: true })).tasks.find((t) => t.id === undated.created.id).done === false)
+// Leaving the completion note empty is a supported skip path.
+overlay.byClass('td-btn').find((node) => overlay.text(node) === '标记完成').props.onClick({})
+await ui.settle()
+let undatedState = (await api('state', { view: 'list', filter: 'all', includeDone: true })).tasks.find((t) => t.id === undated.created.id)
+ok('submitting an empty completion note still completes the task', undatedState.done === true)
+ok('skipping the note records an empty completion summary',
+  undatedState.completionRecords.length === 1 && undatedState.completionRecords[0].summary === '')
+
+// Reopen through the host, then refresh the client before testing the full
+// summary + linked-follow-up path. This also verifies that completion records
+// survive a reopen instead of being overwritten.
+await api('toggle', { id: undated.created.id, done: false })
+ui.byClass('td-icon').find((node) => node.props['aria-label'] === '重新载入').props.onClick({})
+await ui.settle()
+checkbox().props.onClick({ stopPropagation() {} })
+await ui.settle()
+const summaryDraft = overlay.tag('textarea').find((node) => node.props['aria-label'] === '完成情况')
+summaryDraft.props.onChange({ target: { value: '已整理材料并提交，等待审批。' } })
+await ui.settle()
+overlay.tag('input').find((node) => node.props['aria-label'] === '还需要跟进')
+  .props.onChange({ target: { checked: true } })
+await ui.settle()
+const expectedFollowUpDue = new Date(Date.parse(`${today}T00:00:00Z`) + 30 * 86400000).toISOString().slice(0, 10)
+eq('a follow-up is enabled with a default due date 30 days later',
+  overlay.tag('input').find((node) => node.props['aria-label'] === '跟进任务截止日期')?.props.value,
+  expectedFollowUpDue)
+const adjustedFollowUpDue = new Date(Date.parse(`${expectedFollowUpDue}T00:00:00Z`) + 7 * 86400000).toISOString().slice(0, 10)
+overlay.tag('input').find((node) => node.props['aria-label'] === '跟进任务截止日期')
+  .props.onChange({ target: { value: adjustedFollowUpDue } })
+await ui.settle()
+eq('the follow-up due date can be adjusted before completion',
+  overlay.tag('input').find((node) => node.props['aria-label'] === '跟进任务截止日期')?.props.value,
+  adjustedFollowUpDue)
+overlay.tag('input').find((node) => node.props['aria-label'] === '跟进任务标题')
+  .props.onChange({ target: { value: '跟进软著申请审批进度' } })
+await ui.settle()
+overlay.byClass('td-btn').find((node) => overlay.text(node) === '完成并创建跟进').props.onClick({})
+await ui.settle()
+undatedState = (await api('state', { view: 'list', filter: 'all', includeDone: true })).tasks.find((t) => t.id === undated.created.id)
+ok('the completion summary is appended after reopening',
+  undatedState.done === true && undatedState.completionRecords.length === 2
+  && undatedState.completionRecords[1].summary === '已整理材料并提交，等待审批。')
+const linkedFollowUp = (await api('state', { view: 'list', filter: 'all', includeDone: true })).tasks
+  .find((task) => task.id === undatedState.completionRecords[1].followUpTaskId)
+ok('the follow-up task is separate, open, uses the adjusted due date, and links to its source',
+  linkedFollowUp?.done === false && linkedFollowUp.parentId === null
+  && linkedFollowUp.due === adjustedFollowUpDue && linkedFollowUp.followUpOf === undated.created.id
+  && linkedFollowUp.title === '跟进软著申请审批进度')
+ok('the completion dialog closes after saving', completionDialog() === undefined)
+
+// Put the source task back in the open list so later assertions stay simple.
+await api('toggle', { id: undated.created.id, done: false })
+ui.byClass('td-icon').find((node) => node.props['aria-label'] === '重新载入').props.onClick({})
+await ui.settle()
+ok('reopening leaves both completion records intact',
+  (await api('state', { view: 'list', filter: 'all', includeDone: true })).tasks
+    .find((t) => t.id === undated.created.id).completionRecords.length === 2)
+ui.clickable(ui.find('没有日期的想法')).props.onClick({})
+await ui.settle()
+ok('task details show the saved completion summary',
+  overlay.text().includes('已整理材料并提交，等待审批。'))
+ok('task details list the linked follow-up task', overlay.text().includes('跟进软著申请审批进度'))
+overlay.byClass('td-btn').find((node) => overlay.text(node) === '打开跟进任务').props.onClick({})
+await ui.settle()
+ok('a follow-up task links back to its source task',
+  overlay.text().includes('来源任务') && overlay.text().includes('没有日期的想法'))
+overlay.byClass('td-modal-close').find((node) => node.props.title === '关闭（Esc）').props.onClick({})
+await ui.settle()
 
 // ===========================================================================
 section('the centred dialog edits the real task')
@@ -1576,7 +1642,14 @@ const taskInDayPanel = (await api('state', { view: 'list', filter: 'all' })).tas
   .find((t) => ui.text(dayPanelCheck.parent).includes(t.title))
 dayPanelCheck.props.onClick({ stopPropagation() {} })
 await ui.settle()
-ok('the toggle reached the host from the calendar',
+ok('a calendar checkbox opens the same completion form',
+  overlay.byClass('td-modal').some((node) => node.props['aria-label'] === '完成任务'))
+ok('the task remains open until the calendar completion form is submitted',
+  (await api('state', { view: 'list', filter: 'all', includeDone: true })).tasks
+    .find((t) => t.id === taskInDayPanel.id).done === false)
+overlay.byClass('td-btn').find((node) => overlay.text(node) === '标记完成').props.onClick({})
+await ui.settle()
+ok('the calendar completion form completes the intended task',
   (await api('state', { view: 'list', filter: 'all', includeDone: true })).tasks
     .find((t) => t.id === taskInDayPanel.id).done === true)
 ok('the calendar did not swap payload after the toggle',
@@ -2483,8 +2556,15 @@ eq('and it is not swallowed either', inField.propagationStopped, false)
 const wasDone = (await api('state', { view: 'list', filter: 'all' })).tasks.find((t) => t.id === before)?.done
 rootNow().props.onKeyDown(keyEvent(' ', divTarget))
 await ui.settle(3)
-const nowDone = (await api('state', { view: 'list', filter: 'all' })).tasks.find((t) => t.id === before)?.done
-eq('Space toggled the focused row', nowDone, !wasDone)
+ok('Space opens the optional completion form for the focused row',
+  overlay.byClass('td-modal').some((node) => node.props['aria-label'] === '完成任务'))
+eq('Space does not complete the task before the form is submitted',
+  (await api('state', { view: 'list', filter: 'all', includeDone: true })).tasks.find((t) => t.id === before)?.done,
+  wasDone)
+overlay.byClass('td-btn').find((node) => overlay.text(node) === '标记完成').props.onClick({})
+await ui.settle(3)
+const nowDone = (await api('state', { view: 'list', filter: 'all', includeDone: true })).tasks.find((t) => t.id === before)?.done
+eq('Space completes the focused row after confirmation', nowDone, !wasDone)
 rootNow().props.onKeyDown(keyEvent('Enter', divTarget))
 await ui.settle(2)
 // "At least one", not "exactly one": the editor, list-settings dialog, confirm
@@ -2492,8 +2572,8 @@ await ui.settle(2)
 // layers share a z-index and document order is the paint order. The confirm can be
 // asked from inside the editor, so stacked layers are expected, not double mounts.
 ok('Enter opened the focused row', overlay.byClass('td-modal-layer').length >= 1)
-eq('each modal layer has one render owner, including monthly export and appearance settings',
-  [...clientSource.matchAll(/className: 'td-seat td-modal-layer'/g)].length, 5)
+eq('each modal layer has one render owner, including completion, monthly export and appearance settings',
+  [...clientSource.matchAll(/className: 'td-seat td-modal-layer'/g)].length, 6)
 document.key(null, { key: 'Escape' })
 await overlay.settle(2)
 ok('Escape closed it again', overlay.byClass('td-modal').length === 0)

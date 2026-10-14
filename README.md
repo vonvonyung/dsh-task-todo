@@ -24,8 +24,9 @@
 | 复制到 DSH 对话 | 仅在浮窗任务的「更多操作」中提供；把标题和多行备注填入当前会话输入框，保留草稿、不自动发送。使用前需先切回一个 DSH 会话 |
 | 四种视图 | 列表（按 逾期/今天/明天/本周/以后/未安排 分组）、看板（列 = 清单，可拖拽换清单）、日历（月网格，重复任务出现在每个发生日）、甘特图（`start` → `due` 区间，可前后翻页）。切换器在左侧栏的「视图」分组里，窄宽度下自动搬到顶栏 |
 | 任务详情 | 点任意任务/子任务从屏幕正中弹出卡片（Esc、点遮罩、点 ✕ 都能关），面板和全屏用的是同一个弹窗 |
+| 完成记录与后续跟进 | 勾选完成时可填写完成情况（允许留空）；如还要跟进，可同时创建一个默认 30 天后到期、与原任务关联的独立任务 |
 | 子任务 | 任意层级，可折叠；每个子任务有自己的备注、优先级、截止时间 |
-| 备注 | 任务与子任务都能写多行备注（列表里以图标标记，鼠标悬停看内容） |
+| 备注 | 任务与子任务都能写多行备注（列表里以图标标记，鼠标悬停看内容）；它与完成情况记录分开保存 |
 | 重复 | 每天 / 每周（可指定周几）/ 每月，支持间隔（每 2 周）、结束条件（到某天 / 共 N 次）；完成一次会滚动到下一次并重置子任务 |
 | 快速添加 | 一句话搞定：`明天 15:00 交周报 !高 #工作 @紧要`；输入框下方**实时显示这次回车会创建什么**（标题、截止、重复、优先级、标签、清单，清单不存在时会说明将自动创建）——识别结果来自宿主自己的解析器，所见即所得 |
 | 标签 | 左栏「标签」分组列出所有用过的标签与未完成计数，点一下只看该标签；搜索框输入 `#工作` 是同一件事。标签可整体改名（改一次，所有任务跟着变）或清空 |
@@ -248,7 +249,7 @@ Agent 侧是 `task_sync_feishu` 工具（`action=status|test|fields|reconcile|pu
 | `task_list` | `filter` `list` `query` `includeDone` `includeSubtasks` `today` | 任务列表 + 计数 + 全部清单（含 id/颜色/顺序/任务数）+ 文本摘要 |
 | `task_add` | `title` `due` `start` `priority` `list` `tags` `note` `repeat` `repeatInterval` `repeatWeekdays` `repeatUntil` `repeatCount` `parent` | 新任务 |
 | `task_update` | `id`(或唯一标题) + 任意可改字段 | 更新后的任务 |
-| `task_done` | `id` `undone` | 任务（重复任务会滚动到下一次） |
+| `task_done` | `id` `undone` `completionSummary` `followUpTitle` `followUpDue` | 完成记录与关联跟进任务（重复任务会滚动到下一次；跟进日期可省略，默认完成日后 30 天） |
 | `task_delete` | `id` | 被删除的 id（含子任务） |
 | `list_manage` | `action`(list/create/update/move/delete) `id`(或唯一清单名) `name` `newName` `color` `index` `delta` | 清单（或清单列表）+ 文本摘要 |
 | `task_sync_feishu` | `action`(status/test/fields/reconcile/pull/sync) `dryRun` `prune` | 飞书同步状态；只读连接测试；补列结果；完整对账报告；补洞结果；或一次同步的 新增/更新/删除/未变 计数 |
