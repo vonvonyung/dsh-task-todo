@@ -570,6 +570,8 @@ const requireCalls = []
 const layoutCalls = []
 const composerState = { draft: '', draftRev: 0, phase: 'plain' }
 const composerListeners = new Set()
+const clipboardWrites = []
+let clipboardShouldFail = false
 let composerFocusCount = 0
 let composerSubmitCount = 0
 const fakeSessionInput = {
@@ -654,6 +656,14 @@ const testWindow = {
 const sandbox = {
   window: testWindow,
   Event: HarnessEvent,
+  navigator: {
+    clipboard: {
+      async writeText(text) {
+        if (clipboardShouldFail) throw new Error('clipboard permission denied')
+        clipboardWrites.push(text)
+      },
+    },
+  },
   console,
   document,
   setTimeout,
@@ -782,6 +792,7 @@ const sampleActions = taskActionsApi.forTask({ id: 't_test', title: '核对接�
 eq('actions are sorted and unavailable actions stay visible but disabled',
   sampleActions.map(({ id, label, order, enabled, disabledReason }) => ({ id, label, order, enabled, disabledReason })),
   [
+    { id: 'todo.copy-task-content', label: '复制任务内容和备注信息', order: 80, enabled: true, disabledReason: '' },
     { id: 'todo.copy-to-dsh-chat', label: '复制到dsh对话', order: 90, enabled: false, disabledReason: '请先打开或切回一个 DSH 对话，再从浮动待办窗口操作' },
     { id: 'verify.unavailable', label: 'AI 任务台未运行', order: 150, enabled: false, disabledReason: '请先打开 AI 任务台' },
     { id: 'verify.sample', label: '外部动作：核对接口', order: 200, enabled: true, disabledReason: '' },
@@ -1277,10 +1288,15 @@ let extensionButtons = extensionMenu?.children.filter((node) => node.tag === 'bu
 ok('the main task panel keeps the bridge copy action out of its menu',
   extensionButtons.every((node) => !ui.text(node).startsWith('复制到dsh对话')),
   extensionButtons.map((node) => ui.text(node)))
-eq('remaining task actions are ordered by their declared order', extensionButtons.map((node) => ui.text(node)), [
-  'AI 任务台未运行（请先打开 AI 任务台）',
-  '外部动作：没有日期的想法',
-])
+eq('the list/board menu offers clipboard-copy before external actions',
+  extensionButtons.map((node) => ui.text(node)), [
+    '复制任务内容和备注信息',
+    'AI 任务台未运行（请先打开 AI 任务台）',
+    '外部动作：没有日期的想法',
+  ])
+ok('the clipboard-copy action is enabled in the main task panel',
+  extensionButtons[0]?.props.disabled === false)
+
 const menuButtons = extensionMenu?.children.filter((node) => node.tag === 'button') ?? []
 const menuButtonLabels = menuButtons.map((node) => ui.text(node))
 const firstActionIndex = menuButtons.findIndex((node) => node.props.className === 'td-task-action')
@@ -1288,12 +1304,12 @@ const deleteActionIndex = menuButtonLabels.indexOf('删除任务')
 ok('extension actions follow list destinations and precede delete',
   firstActionIndex > -1 && deleteActionIndex > menuButtonLabels.indexOf('外部动作：没有日期的想法')
   && menuButtonLabels.indexOf('收集箱') < firstActionIndex)
-const unavailableButton = extensionButtons[0]
+const unavailableButton = extensionButtons[1]
 ok('an unavailable extension action is visibly disabled with an explanation',
   unavailableButton?.props.disabled === true && unavailableButton?.props.title === '请先打开 AI 任务台')
 await unavailableButton?.props.onClick({})
 ok('a disabled action cannot run', disabledActionRunCount === 0)
-const sampleActionButton = extensionButtons[1]
+const sampleActionButton = extensionButtons[2]
 await sampleActionButton?.props.onClick({})
 await ui.settle()
 ok('the registered action received the selected live task snapshot',
@@ -1344,6 +1360,14 @@ const listMenuActions = ui.byClass('td-pop').flatMap((node) => node.children)
   .filter((node) => node.tag === 'button' && node.props.className === 'td-task-action')
 ok('the main list task menu no longer includes copy-to-DSH',
   listMenuActions.every((node) => !ui.text(node).startsWith('复制到dsh对话')))
+const listClipboardCopyButton = listMenuActions.find((node) =>
+  ui.text(node).startsWith('复制任务内容和备注信息'))
+ok('the main list task menu offers the clipboard-copy action', listClipboardCopyButton !== undefined)
+await listClipboardCopyButton?.props.onClick({})
+await settleAll(3)
+eq('clipboard-copy includes the task title and complete multiline note',
+  clipboardWrites.at(-1), '没有日期的想法\n\n第一行备注\n第二行备注')
+ok('clipboard-copy confirms success with a toast', ui.text().includes('已复制任务内容和备注信息'))
 const listMenuCancel = ui.byClass('td-pop').flatMap((node) => node.children)
   .find((node) => node.tag === 'button' && ui.text(node) === '取消')
 listMenuCancel?.props.onClick({})
@@ -1357,6 +1381,16 @@ const boardMenuActions = ui.byClass('td-pop').flatMap((node) => node.children)
   .filter((node) => node.tag === 'button' && node.props.className === 'td-task-action')
 ok('the main board task menu no longer includes copy-to-DSH',
   boardMenuActions.every((node) => !ui.text(node).startsWith('复制到dsh对话')))
+ok('the main board task menu offers clipboard-copy',
+  boardMenuActions.some((node) => ui.text(node).startsWith('复制任务内容和备注信息')))
+const boardClipboardCopyButton = boardMenuActions.find((node) =>
+  ui.text(node).startsWith('复制任务内容和备注信息'))
+clipboardShouldFail = true
+await boardClipboardCopyButton?.props.onClick({})
+await settleAll(3)
+clipboardShouldFail = false
+ok('clipboard permission failures are reported without crashing the task menu',
+  ui.text().includes('复制失败，请检查剪贴板权限后重试'))
 const boardMenuCancel = ui.byClass('td-pop').flatMap((node) => node.children)
   .find((node) => node.tag === 'button' && ui.text(node) === '取消')
 boardMenuCancel?.props.onClick({})
@@ -1391,6 +1425,10 @@ const floatCopyButton = () => overlay.byClass('td-pop').flatMap((node) => node.c
     && overlay.text(node).startsWith('复制到dsh对话'))
 const copyBeforeConversation = floatCopyButton()
 ok('copy-to-DSH appears in the floating task menu', copyBeforeConversation !== undefined)
+ok('generic clipboard-copy stays in list/board menus, not the floating menu',
+  !overlay.byClass('td-pop').flatMap((node) => node.children)
+    .some((node) => node.tag === 'button' && node.props.className === 'td-task-action'
+      && overlay.text(node).startsWith('复制任务内容和备注信息')))
 ok('the floating action explains that a DSH conversation must be active',
   copyBeforeConversation?.props.disabled === true
   && copyBeforeConversation?.props.title === '请先打开或切回一个 DSH 对话，再从浮动待办窗口操作')

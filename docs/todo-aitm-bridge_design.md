@@ -1,8 +1,8 @@
 # 待办任务 → AI 任务台桥接：设计与实施记录
 
-> 状态（2026-10-13）：**待办侧 v1 任务菜单 ABI 已在固定分支提交 `8f702e3`，版本冲突保护后续由 `279e744` 加固；桥插件和 AI 任务台 Bridge v1 服务端 API 已分别在各自仓库完成一轮开发。** 桥插件提交 `cba9108`（分支 `arena/90610371-dsh-todo-aitm-bridge`），AI 任务台提交 `0bfef98`（分支 `arena/01a0fd0e-ai-tasks-mgr`，v0.3.48）。两边均未在真实 DSH 中加载或端到端联调；宿主 API 的运行时接缝仍待验证。阶段 3 agent 工具继续暂缓，不导出或复制 `L3` 句柄。
+> 状态（2026-10-14）：**待办侧 v1 任务菜单 ABI 已在固定分支提交 `8f702e3`，版本冲突保护后续由 `279e744` 加固；桥插件和 AI 任务台 Bridge v1 服务端 API 已分别在各自仓库完成一轮开发。** 桥插件提交 `cba9108`（分支 `arena/90610371-dsh-todo-aitm-bridge`），AI 任务台提交 `0bfef98`（分支 `arena/01a0fd0e-ai-tasks-mgr`，v0.3.48）。两边均未在真实 DSH 中加载或端到端联调；宿主 API 的运行时接缝仍待验证。阶段 3 agent 工具继续暂缓，不导出或复制 `L3` 句柄。
 >
-> 当前待办 checkout 验证：`verify-client-render.mjs` **507/507 通过**（React 19.3.0）；`npm test` 的 **10/10 gate 通过**并报 `READY`。
+> 当前待办 checkout 验证：`verify-client-render.mjs` **514/514 通过**（React 19.3.0）；`npm test` 的 **10/10 gate 通过**并报 `READY`。列表/看板剪贴板复制动作已实现；浮窗仍单独保留 DSH composer 插入动作。
 
 ## 1. 一句话
 
@@ -119,8 +119,9 @@ API 发布后派发 ready 事件，方便先加载的扩展等待；后加载的
 4. **加载顺序与动态更新**：ready 事件、`subscribe` 和 `forTask` 覆盖先加载、后加载以及菜单打开期间注册/注销。
 5. **危险操作位置**：扩展项位于清单移动选项之后、删除任务之前。
 6. **复制到 DSH 对话仅放在浮窗**：待办主面板会替换会话内容，当前会话输入框 slot 因此不可用；浮窗由 `shell.overlay` 承载，切回会话后仍可留在屏幕上。动作只出现在浮窗任务的「更多操作」里；没有可用会话时，提示用户先切回会话。
+7. **列表/看板另提供剪贴板复制**：主面板任务菜单提供「复制任务内容和备注信息」，把标题与原样多行备注作为纯文本复制到系统剪贴板；它与浮窗中的 composer 插入动作是两个不同的目标。
 
-`scripts/verify-client-render.mjs` 从基线的 **460** 增至 **489** 项（新增 29 项）。新增覆盖包括事件加载顺序、排序、显隐/禁用、非法注册、替换与 stale disposer、菜单即时更新、扩展项相对删除操作的位置、冻结快照、回调 API 边界、任务 ID 作用域、mutate 回包隔离、状态 toast、错误隔离及不覆盖不兼容 API 版本。当前使用 React 19.3.0 时为 **489/489 全通过**；全量 gate 结果见 §6。
+`verify-client-render.mjs` 最初从基线的 **460** 增至 **489** 项（ABI 覆盖新增 29 项），另覆盖事件加载顺序、排序、显隐/禁用、非法注册、替换与 stale disposer、菜单即时更新、扩展项相对删除操作的位置、冻结快照、回调 API 边界、任务 ID 作用域、mutate 回包隔离、状态 toast、错误隔离及不覆盖不兼容 API 版本。本次又新增列表/看板剪贴板动作的注册、标题与完整多行备注载荷、失败提示，以及浮窗动作隔离测试；当前 React 19.3.0 下 **514/514 全通过**，全量 gate 结果见 §6。
 
 ---
 
@@ -154,12 +155,13 @@ AI 任务台 Bridge v1 已由 `ai-tasks-mgr` commit `0bfef98`（v0.3.48）实现
 
 ---
 
-## 6. 当前实现、验证与未完成项（2026-10-13）
+## 6. 当前实现、验证与未完成项（2026-10-14）
 
 | 项 | 当前状态 |
 | --- | --- |
 | 待办端 v1 扩展 ABI 与菜单接入 | ✅ 已提交至固定分支，commit `8f702e3`；版本冲突保护 `279e744` |
-| 待办端客户端断言 | ✅ 507/507 通过；覆盖 ABI 版本边界、菜单、生命周期、窄权限和错误隔离 |
+| 列表/看板剪贴板复制 | ✅ 标题和完整多行备注复制到系统剪贴板；浮窗仍只提供 DSH composer 插入 |
+| 待办端客户端断言 | ✅ 514/514 通过；覆盖 ABI 版本边界、菜单、剪贴板载荷/错误、生命周期、窄权限和错误隔离 |
 | 桥插件客户端与宿主端 | ✅ 对应会话报告 commit `cba9108`；84 项测试通过；未在真实 DSH 加载 |
 | AI 任务台 Bridge v1 API | ✅ 对应会话报告 commit `0bfef98`（v0.3.48）；真实运行时尚未联调 |
 | 菜单创建关联想法 | ✅ 桥端已实现 `sourceRef` 幂等流程；端到端未验证 |
@@ -170,7 +172,7 @@ AI 任务台 Bridge v1 已由 `ai-tasks-mgr` commit `0bfef98`（v0.3.48）实现
 ### 6.1 当前 checkout 的验证结果
 
 - `node --check lib/client.js` 与 `node --check scripts/verify-client-render.mjs` 通过。
-- `node scripts/verify-client-render.mjs`：**CLIENT RENDER: ALL PASS (507)**，使用 React 19.3.0。
+- `node scripts/verify-client-render.mjs`：**CLIENT RENDER: ALL PASS (514)**，使用 React 19.3.0。
 - 全量 `npm test`：**10/10 个 gate 脚本全部通过**；`check-ready` 报 `READY: all gates pass and the package is installable`。
 - 测试依赖在本机通过 `npm install --no-save --package-lock=false` 安装，没有修改 `package.json` 或 lockfile。该 harness 依赖 React 19 的 ref-in-props 行为；React 18.3.1 会令其模拟 DOM 无法绑定 ref，导致 9 项与 sidebar/keyboard 相关的假失败。改用 React 19.3.0 后客户端与全量 gate 均通过。
 
@@ -184,7 +186,7 @@ AI 任务台 Bridge v1 已由 `ai-tasks-mgr` commit `0bfef98`（v0.3.48）实现
 
 1. **“没有菜单行”不等于同一种故障。** 没有消费者注册时是正常的空菜单；消费者注册了但服务不可用时，应保留灰色禁用项和恢复原因；插件自身加载失败则应由宿主日志诊断。UI 不能把这些状态混为一谈。
 
-2. **客户端 gate 对 React 版本有要求。** 测试 harness 将 React element 的 `ref` 从 props 绑定到模拟 DOM，依赖 React 19 的 ref-in-props 形状。React 18.3.1 会让 refs 为空并造成 9 项 sidebar/keyboard 假失败；React 19.3.0 下客户端 507/507、全量 gate 10/10 均通过。
+2. **客户端 gate 对 React 版本有要求。** 测试 harness 将 React element 的 `ref` 从 props 绑定到模拟 DOM，依赖 React 19 的 ref-in-props 形状。React 18.3.1 会让 refs 为空并造成 9 项 sidebar/keyboard 假失败；React 19.3.0 下客户端 514/514、全量 gate 10/10 均通过。
 
 3. **旧 DSH Desktop 安装记录仅作历史上下文。** 其中关于 `docs/desktop-install.md` 的 `rejectElectronProfile`、实际安装方式等来自另一台机器/会话；本 sandbox 未复现，不能当作当前桥仓库状态或根因结论。
 
@@ -233,7 +235,7 @@ AI 任务台 Bridge v1 已由 `ai-tasks-mgr` commit `0bfef98`（v0.3.48）实现
 - **同意 §3.2 选独立桥插件 C**：这是可选集成，桥单独发布能隔离两边的依赖和故障。待办侧现已实现正式、版本化的 v1 菜单扩展点；桥侧应只调用 AI 任务台明确支持的集成接口。
 - **建议分阶段**：先让菜单可稳定地“在任务台创建想法”；然后处理“创建并启动工作”的确认、幂等和失败恢复；最后再增加 agent 工具。这样不会让工具依赖或有副作用的启动流程阻塞最基本的想法创建。
 - **受限的发现与调用接口已在源码层实现**：AI 任务台 commit `0bfef98` 提供 `protocol: 1` 的 Bridge API 与冻结的 `aitmBridge` 宿主服务。早期对 `/aitm-plugin/config` 的诊断路由核验仍可作为历史边界说明；它不是新 API 的替代品。直接 `L3.invoke()` 仍只对持有实例的 AI 任务台插件代码可用，不应暴露给桥。
-- 本评审针对方案和源码边界，不代表真实 DSH 环境已通过端到端验证。当前待办 checkout 的客户端测试为 507/507，`npm test` 10 个 gate 全部通过；桥 commit `cba9108` 报告 84 项测试通过。桥与 AI 任务台均尚未在真实 DSH 中加载/联调。
+- 本评审针对方案和源码边界，不代表真实 DSH 环境已通过端到端验证。当前待办 checkout 的客户端测试为 514/514，`npm test` 10 个 gate 全部通过；桥 commit `cba9108` 报告 84 项测试通过。桥与 AI 任务台均尚未在真实 DSH 中加载/联调。
 
 ### 10.2 对评审意见与实现边界的逐项答复
 
