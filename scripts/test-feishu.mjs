@@ -619,19 +619,70 @@ const autoConflictTask = autoConflictStore.create({ id: 't_auto_conflict', title
 await autoConflict.syncFeishu({})
 const autoConflictRecord = [...autoConflictServer.state.records.entries()].find(([, fields]) => fields['任务ID'] === autoConflictTask.id)
 autoConflictRecord[1]['标题'] = '飞书端自动冲突值'
+autoConflictRecord[1]['备注'] = '飞书端独立手写的备注'
+const autoForeignRecordId = 'rec_foreign_auto'
+autoConflictServer.state.records.set(autoForeignRecordId, {
+  任务ID: 't_foreign_auto', 标题: '飞书独有任务', 备注: '飞书独有内容',
+})
 autoConflictStore.update(autoConflictTask.id, { title: '本地端自动冲突值' })
+const autoAddedTask = autoConflictStore.create({ id: 't_auto_new', title: '本地新增任务' })
+// Only inspect the second (automatic) run's writes. This is the reported
+// regression shape: a local add must not turn into a replacement of the table.
+autoConflictServer.state.calls.length = 0
 autoConflict.applySettings({
   dataFile: path.join(dir, 'auto-conflict.json'),
   feishu: { enabled: true, appId: 'a', appSecret: 'b', appToken: 'c', tableId: 'd', autoSync: true },
 })
 await autoConflict.feishuRunAuto()
 eq('automatic sync skips rather than overwriting a conflict', autoConflictRecord[1]['标题'], '飞书端自动冲突值')
+eq('automatic sync preserves a remote-only field on the conflicted row',
+  autoConflictRecord[1]['备注'], '飞书端独立手写的备注')
+eq('automatic sync preserves rows that exist only in Feishu',
+  autoConflictServer.state.records.get(autoForeignRecordId), {
+    任务ID: 't_foreign_auto', 标题: '飞书独有任务', 备注: '飞书独有内容',
+  })
+const autoAddedRecord = [...autoConflictServer.state.records.entries()].find(([, fields]) => fields['任务ID'] === autoAddedTask.id)
+eq('automatic sync still adds the new local task', autoAddedRecord?.[1]?.['标题'], '本地新增任务')
+eq('the local-add regression only issues a create, never a table-wide update or deletion',
+  autoConflictServer.state.calls.filter((call) => /\/batch_(?:create|update|delete)$/.test(call.pathname))
+    .map((call) => call.pathname.split('/').at(-1)), ['batch_create'])
 eq('automatic conflict details remain visible in last-sync status',
   autoConflict.feishuStatus().lastSync.summary.skippedConflicts, 1)
 ok('automatic sync reports both values in the host log',
   autoConflictLogs.some((message) => message.includes('本地端自动冲突值') && message.includes('飞书端自动冲突值')),
   autoConflictLogs)
 autoConflict.dispose()
+
+// A pre-existing table may have no saved baseline yet (for example, when
+// auto-sync is enabled before the first successful sync). In that state an
+// unknown difference is still a conflict, never a reason to push the local copy.
+const autoUnknownServer = makeFeishuServer()
+const autoUnknown = new TodoService(null, () => {}, {
+  fetch: autoUnknownServer.fetch, settingsFile: path.join(dir, 'auto-unknown-settings.json'),
+})
+autoUnknown.applySettings({
+  dataFile: path.join(dir, 'auto-unknown.json'),
+  feishu: { enabled: true, appId: 'a', appSecret: 'b', appToken: 'c', tableId: 'd', autoSync: false },
+})
+const autoUnknownStore = autoUnknown.require()
+const autoUnknownTask = autoUnknownStore.create({ id: 't_auto_unknown', title: '本地已有任务', note: '本地备注' })
+autoUnknownServer.state.records.set('rec_unknown_baseline', {
+  ...taskToFields(autoUnknownTask, autoUnknownStore, { today: T }),
+  备注: '飞书已有的手写备注',
+})
+const autoUnknownAdded = autoUnknownStore.create({ id: 't_auto_unknown_new', title: '本地新增任务' })
+autoUnknown.applySettings({
+  dataFile: path.join(dir, 'auto-unknown.json'),
+  feishu: { enabled: true, appId: 'a', appSecret: 'b', appToken: 'c', tableId: 'd', autoSync: true },
+})
+await autoUnknown.feishuRunAuto()
+eq('without a baseline, automatic sync does not overwrite an existing Feishu field',
+  autoUnknownServer.state.records.get('rec_unknown_baseline')['备注'], '飞书已有的手写备注')
+eq('without a baseline, automatic sync still creates a new local task',
+  [...autoUnknownServer.state.records.values()].find((fields) => fields['任务ID'] === autoUnknownAdded.id)?.['标题'], '本地新增任务')
+eq('unknown-baseline conflict is reported instead of guessed',
+  autoUnknown.feishuStatus().lastSync.summary.skippedConflicts, 1)
+autoUnknown.dispose()
 
 // ---------------------------------------------------------------------------
 // the setup and diagnosis surface: test / fields / reconcile / pull

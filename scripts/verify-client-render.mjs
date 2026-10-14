@@ -3278,11 +3278,17 @@ ok('the reverse-import preview asks for an explicit confirmation',
   ui.byClass('td-set-btn').some((node) => ui.text(node) === '确认应用以上预览'))
 ok('the preview report shows both sides',
   ui.text().includes('本地标题') && ui.text().includes('飞书标题'), ui.text().slice(-500))
+ok('the preview gives persistent feedback near the settings header, not only below the fold',
+  ui.byClass('td-set-banner').some((node) => ui.text(node).includes('飞书预览已完成') && ui.text(node).includes('可更新 1 项')),
+  ui.text().slice(0, 360))
 await press('确认应用以上预览')
 eq('the preview and confirmation requests are separate, and confirmation carries the token',
   uiFeishuMock.applyCalls, [{ dryRun: true }, { previewToken: 'remote-preview-token' }])
 eq('the confirmation request includes the preview token', uiFeishuMock.applyCalls.at(-1)?.previewToken, 'remote-preview-token')
 eq('confirmed import ends with a completion report', ui.text().includes('已更新 1 项'), true)
+ok('the confirmation leaves a persistent completion message near the settings header',
+  ui.byClass('td-set-banner').some((node) => ui.text(node).includes('已更新 1 项')),
+  ui.text().slice(0, 360))
 
 uiFeishuMock.syncActual = {
   blocked: false, stale: false, dryRun: false, local: 1, remote: 1, unchanged: 0,
