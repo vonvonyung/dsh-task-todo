@@ -782,7 +782,7 @@ const sampleActions = taskActionsApi.forTask({ id: 't_test', title: '核对接�
 eq('actions are sorted and unavailable actions stay visible but disabled',
   sampleActions.map(({ id, label, order, enabled, disabledReason }) => ({ id, label, order, enabled, disabledReason })),
   [
-    { id: 'todo.copy-to-dsh-chat', label: '复制到dsh对话', order: 90, enabled: false, disabledReason: '当前没有可用的 DSH 对话输入框' },
+    { id: 'todo.copy-to-dsh-chat', label: '复制到dsh对话', order: 90, enabled: false, disabledReason: '请先打开或切回一个 DSH 对话，再从浮动待办窗口操作' },
     { id: 'verify.unavailable', label: 'AI 任务台未运行', order: 150, enabled: false, disabledReason: '请先打开 AI 任务台' },
     { id: 'verify.sample', label: '外部动作：核对接口', order: 200, enabled: true, disabledReason: '' },
   ])
@@ -1274,8 +1274,10 @@ await ui.settle()
 let extensionMenu = ui.byClass('td-pop').find((node) => ui.text(node).includes('外部动作：没有日期的想法'))
 ok('the task menu contains the registered extension', extensionMenu !== undefined)
 let extensionButtons = extensionMenu?.children.filter((node) => node.tag === 'button' && node.props.className === 'td-task-action') ?? []
-eq('task actions are ordered by their declared order', extensionButtons.map((node) => ui.text(node)), [
-  '复制到dsh对话（当前没有可用的 DSH 对话输入框）',
+ok('the main task panel keeps the bridge copy action out of its menu',
+  extensionButtons.every((node) => !ui.text(node).startsWith('复制到dsh对话')),
+  extensionButtons.map((node) => ui.text(node)))
+eq('remaining task actions are ordered by their declared order', extensionButtons.map((node) => ui.text(node)), [
   'AI 任务台未运行（请先打开 AI 任务台）',
   '外部动作：没有日期的想法',
 ])
@@ -1286,16 +1288,12 @@ const deleteActionIndex = menuButtonLabels.indexOf('删除任务')
 ok('extension actions follow list destinations and precede delete',
   firstActionIndex > -1 && deleteActionIndex > menuButtonLabels.indexOf('外部动作：没有日期的想法')
   && menuButtonLabels.indexOf('收集箱') < firstActionIndex)
-const copyWithoutComposer = extensionButtons[0]
-ok('copy-to-chat is visibly disabled when no DSH composer is mounted',
-  copyWithoutComposer?.props.disabled === true
-  && copyWithoutComposer?.props.title === '当前没有可用的 DSH 对话输入框')
-const unavailableButton = extensionButtons[1]
+const unavailableButton = extensionButtons[0]
 ok('an unavailable extension action is visibly disabled with an explanation',
   unavailableButton?.props.disabled === true && unavailableButton?.props.title === '请先打开 AI 任务台')
 await unavailableButton?.props.onClick({})
 ok('a disabled action cannot run', disabledActionRunCount === 0)
-const sampleActionButton = extensionButtons[2]
+const sampleActionButton = extensionButtons[1]
 await sampleActionButton?.props.onClick({})
 await ui.settle()
 ok('the registered action received the selected live task snapshot',
@@ -1327,8 +1325,8 @@ ok('mutations return only a frozen task snapshot, never the full view state',
 ok('a returned status string is announced to the user', ui.text().includes('外部动作已运行'))
 ok('the task menu closes after the action', ui.byClass('td-pop').length === 0)
 
-// The copy action is present in both task surfaces and uses the public Session
-// input API. Its note payload remains multiline, and no submit is triggered.
+// The copy action is intentionally confined to the floating seat and uses the
+// public Session input API. Its note payload remains multiline, and no submit is triggered.
 await api('update', { id: undated.created.id, note: '第一行备注\n第二行备注' })
 const reloadTodo = ui.byClass('td-icon').find((node) => node.props['aria-label'] === '重新载入')
 reloadTodo?.props.onClick({})
@@ -1342,13 +1340,10 @@ listTaskMenuTrigger?.props.onClick({
   stopPropagation() {}, currentTarget: { getBoundingClientRect: () => ({ bottom: 100, left: 240 }) },
 })
 await ui.settle()
-const listCopyButton = ui.byClass('td-pop').flatMap((node) => node.children)
-  .find((node) => node.tag === 'button' && node.props.className === 'td-task-action'
-    && ui.text(node).startsWith('复制到dsh对话'))
-ok('the list task menu includes copy-to-DSH', listCopyButton !== undefined)
-ok('copy-to-DSH explains that no composer is currently available',
-  listCopyButton?.props.disabled === true
-  && listCopyButton?.props.title === '当前没有可用的 DSH 对话输入框')
+const listMenuActions = ui.byClass('td-pop').flatMap((node) => node.children)
+  .filter((node) => node.tag === 'button' && node.props.className === 'td-task-action')
+ok('the main list task menu no longer includes copy-to-DSH',
+  listMenuActions.every((node) => !ui.text(node).startsWith('复制到dsh对话')))
 const listMenuCancel = ui.byClass('td-pop').flatMap((node) => node.children)
   .find((node) => node.tag === 'button' && ui.text(node) === '取消')
 listMenuCancel?.props.onClick({})
@@ -1358,49 +1353,100 @@ ui.clickable(ui.find('看板')).props.onClick({})
 await ui.settle()
 openExtensionMenu()
 await ui.settle()
-const boardCopyBeforeBridge = ui.byClass('td-pop').flatMap((node) => node.children)
-  .find((node) => node.tag === 'button' && node.props.className === 'td-task-action'
-    && ui.text(node).startsWith('复制到dsh对话'))
-ok('the board task menu also includes copy-to-DSH before a composer is mounted',
-  boardCopyBeforeBridge?.props.disabled === true)
+const boardMenuActions = ui.byClass('td-pop').flatMap((node) => node.children)
+  .filter((node) => node.tag === 'button' && node.props.className === 'td-task-action')
+ok('the main board task menu no longer includes copy-to-DSH',
+  boardMenuActions.every((node) => !ui.text(node).startsWith('复制到dsh对话')))
+const boardMenuCancel = ui.byClass('td-pop').flatMap((node) => node.children)
+  .find((node) => node.tag === 'button' && ui.text(node) === '取消')
+boardMenuCancel?.props.onClick({})
+await ui.settle()
+
 const composerBridgeEntry = registrations.find((entry) =>
   entry.key === 'conversation.input.left' && entry.options.id === 'todo-copy-to-dsh-chat-bridge')
 ok('the hidden bridge registers in DSH’s session-scoped composer slot', composerBridgeEntry !== undefined)
 const composerBridgeRoot = createRoot().api
+const openFloatButton = ui.tag('button').find((node) => node.props['aria-label'] === '打开浮动小窗口')
+ok('the main task panel still has its floating-window control', openFloatButton !== undefined)
+openFloatButton?.props.onClick({})
+await settleAll(5)
+ok('the floating task window is mounted in the shell overlay', overlay.byClass('td-float').length === 1)
+
+const openFloatTaskMenu = () => {
+  const row = overlay.byClass('td-row').find((node) => overlay.text(node).includes('没有日期的想法'))
+  const trigger = overlay.tag('button').find((node) =>
+    node.props['aria-label'] === '更多任务操作' && row?.contains(node))
+  return trigger?.props.onClick({
+    stopPropagation() {}, currentTarget: { getBoundingClientRect: () => ({ bottom: 100, left: 380 }) },
+  })
+}
+const floatingRow = overlay.byClass('td-row').find((node) => overlay.text(node).includes('没有日期的想法'))
+const floatingMenuTrigger = overlay.tag('button').find((node) =>
+  node.props['aria-label'] === '更多任务操作' && floatingRow?.contains(node))
+ok('the compact floating checklist exposes a task-actions menu', floatingMenuTrigger !== undefined)
+openFloatTaskMenu()
+await settleAll(3)
+const floatCopyButton = () => overlay.byClass('td-pop').flatMap((node) => node.children)
+  .find((node) => node.tag === 'button' && node.props.className === 'td-task-action'
+    && overlay.text(node).startsWith('复制到dsh对话'))
+const copyBeforeConversation = floatCopyButton()
+ok('copy-to-DSH appears in the floating task menu', copyBeforeConversation !== undefined)
+ok('the floating action explains that a DSH conversation must be active',
+  copyBeforeConversation?.props.disabled === true
+  && copyBeforeConversation?.props.title === '请先打开或切回一个 DSH 对话，再从浮动待办窗口操作')
+
 if (composerBridgeEntry !== undefined) {
   const composerBridgeProps = composerBridgeEntry.options.inject('test-session') ?? {}
   composerBridgeRoot.render(React.createElement(composerBridgeEntry.Component, {
     sessionId: 'test-session', inputActions: fakeInputActions, ...composerBridgeProps,
   }))
 }
-await ui.settle()
-const boardCopyButton = ui.byClass('td-pop').flatMap((node) => node.children)
+await settleAll(4)
+const panelTaskRow = ui.byClass('td-row').find((node) => ui.text(node).includes('没有日期的想法'))
+const panelTaskMenuTrigger = ui.tag('button').find((node) =>
+  node.props['aria-label'] === '更多任务操作' && panelTaskRow?.contains(node))
+panelTaskMenuTrigger?.props.onClick({
+  stopPropagation() {}, currentTarget: { getBoundingClientRect: () => ({ bottom: 100, left: 240 }) },
+})
+await settleAll(3)
+const panelCopyWithComposer = ui.byClass('td-pop').flatMap((node) => node.children)
   .find((node) => node.tag === 'button' && node.props.className === 'td-task-action'
     && ui.text(node).startsWith('复制到dsh对话'))
-ok('composer availability enables the open board-menu action',
-  boardCopyButton?.props.disabled === false)
-await boardCopyButton?.props.onClick({})
-await ui.settle()
+ok('copy-to-DSH stays out of the main panel even when a composer is available',
+  panelCopyWithComposer === undefined)
+const panelMenuCancel = ui.byClass('td-pop').flatMap((node) => node.children)
+  .find((node) => node.tag === 'button' && ui.text(node) === '取消')
+panelMenuCancel?.props.onClick({})
+await settleAll(2)
+
+const enabledFloatCopy = floatCopyButton()
+ok('opening a DSH composer enables the copy action in the floating menu',
+  enabledFloatCopy?.props.disabled === false)
+await enabledFloatCopy?.props.onClick({})
+await settleAll(4)
 eq('copy-to-DSH inserts the title and the complete multiline note', composerState.draft,
   '没有日期的想法\n\n第一行备注\n第二行备注')
 ok('copy-to-DSH returns focus to the DSH composer', composerFocusCount === 1)
 ok('copy-to-DSH fills the composer without submitting', composerSubmitCount === 0)
 ok('copy-to-DSH reports that the text was filled but not sent',
-  ui.text().includes('已填入当前 DSH 对话输入框（未发送）'))
+  overlay.text().includes('已填入当前 DSH 对话输入框（未发送）'))
 
 composerState.draft = '已有草稿'
 composerState.draftRev++
 for (const listener of [...composerListeners]) listener()
-openExtensionMenu()
-await ui.settle()
-const copyWithExistingDraft = ui.byClass('td-pop').flatMap((node) => node.children)
-  .find((node) => node.tag === 'button' && node.props.className === 'td-task-action'
-    && ui.text(node).startsWith('复制到dsh对话'))
+await settleAll(3)
+openFloatTaskMenu()
+await settleAll(3)
+const copyWithExistingDraft = floatCopyButton()
 await copyWithExistingDraft?.props.onClick({})
-await ui.settle()
+await settleAll(4)
 eq('copy-to-DSH preserves existing unsent text and separates the copied task', composerState.draft,
   '已有草稿\n\n没有日期的想法\n\n第一行备注\n第二行备注\n\n')
 ok('copying a task never submits it, including when appending', composerSubmitCount === 0)
+const closeFloatButton = overlay.tag('button').find((node) => node.props['aria-label'] === '关闭浮动窗口')
+closeFloatButton?.props.onClick({})
+await settleAll(4)
+eq('the floating seat closes cleanly after use', overlay.byClass('td-float').length, 0)
 
 // Registering and disposing an action while a menu is open updates the menu
 // without requiring the user to close and reopen it.
