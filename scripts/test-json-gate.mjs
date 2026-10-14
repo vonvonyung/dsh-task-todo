@@ -14,6 +14,7 @@ import path from 'node:path'
 import http from 'node:http'
 import { pathToFileURL } from 'node:url'
 import { isJsonValue, snapshotJsonValue } from '@deepseek-ai/dsh-util-values'
+import { unzipSync } from 'fflate'
 
 // Workspace-local scratch space: the system temp directory is not reliably
 // writable under the file sandbox, and a run must not depend on its ACLs.
@@ -232,6 +233,12 @@ const api = async (method, args) => {
 const state = await api('state')
 ok('state succeeds', state.body.ok === true, state.body.error)
 gate('API state', state.body)
+const planModules = await api('planSheetModules', {})
+gate('API planSheetModules', planModules.body)
+ok('the export module list is selectable and JSON-safe',
+  planModules.body.ok === true && planModules.body.data.length === 1
+  && planModules.body.data[0].id === 'plan_engine/template_2026-10-prototype.xlsx',
+  planModules.body)
 
 for (const [method, args] of [
   ['status', {}],
@@ -396,10 +403,45 @@ ok('a seeded list is honoured', seededList.body.data.task.listId === seedTarget.
 // The client renders the shortcut hints from this payload, so an unset or broken
 // value has to arrive as a usable one.
 const settingsPayload = (await api('state')).body.data.settings
+ok('the state payload carries the safe default style', settingsPayload.appearance === 'flat', settingsPayload.appearance)
 ok('the state payload carries the hotkeys', settingsPayload.hotkey !== undefined
   && typeof settingsPayload.hotkey.capture === 'string' && typeof settingsPayload.hotkey.palette === 'string',
   settingsPayload.hotkey)
 gate('state payload settings', settingsPayload)
+
+console.log('--- monthly plan workbook download ---')
+const monthlyList = await api('createList', { name: '月度目标' })
+gate('API createList for monthly goals', monthlyList.body)
+const monthlyGoal = await api('create', {
+  title: '月度计划接口目标', listId: monthlyList.body.data.list.id, due: '2026-10-31',
+})
+gate('API create monthly goal', monthlyGoal.body)
+const planQuery = new URLSearchParams({
+  module: planModules.body.data[0].id,
+  month: '2026-10',
+  owner: '临时填写人',
+})
+const workbookResponse = await fetch(`${base}/plan-sheet?${planQuery.toString()}`)
+const workbookBytes = new Uint8Array(await workbookResponse.arrayBuffer())
+const workbookParts = unzipSync(workbookBytes)
+ok('GET /plan-sheet returns an XLSX attachment',
+  workbookResponse.status === 200
+  && workbookResponse.headers.get('content-type') === 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+  && String(workbookResponse.headers.get('content-disposition')).includes('filename*='),
+  { status: workbookResponse.status, type: workbookResponse.headers.get('content-type') })
+ok('the downloaded workbook contains locally stored monthly goal data',
+  new TextDecoder().decode(workbookParts['xl/worksheets/sheet2.xml']).includes('月度计划接口目标'))
+ok('the export filename encodes the selected month and one-shot owner',
+  decodeURIComponent(String(workbookResponse.headers.get('content-disposition')).split("filename*=UTF-8''")[1])
+    .includes('临时填写人-2026-10.xlsx'))
+const badPlanResponse = await fetch(`${base}/plan-sheet?module=${encodeURIComponent(planModules.body.data[0].id)}&month=2026-13`)
+const badPlanPayload = await badPlanResponse.json()
+ok('invalid export months return an actionable 400 JSON error',
+  badPlanResponse.status === 400 && String(badPlanPayload.error).includes('月份'), badPlanPayload)
+gate('monthly plan HTTP error payload', badPlanPayload)
+const unsafeModuleResponse = await fetch(`${base}/plan-sheet?module=${encodeURIComponent('../../outside.xlsx')}&month=2026-10`)
+ok('unknown template ids cannot select a filesystem path', unsafeModuleResponse.status === 400,
+  unsafeModuleResponse.status)
 
 console.log('--- backup: export then import ---')
 // Placed last on purpose: importing an older document legitimately rewinds the

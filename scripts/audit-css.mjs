@@ -182,24 +182,33 @@ const declarations = aliasBlock.split(';')
 const mapped = declarations.filter((d) => /--td-[\w-]+\s*:/.test(d) && d.includes('var(--dsw-alias-')).length
 ok('the token map is declared once, on the seat marker', aliased.has('td-seat') && aliased.size === 1, [...aliased])
 ok('the aliases resolve to host tokens', mapped >= 10, mapped)
-
-// Literal colours are the listed exceptions: two priority hues, the success green
-// and the warm accent have no host token (a semantic HUE cannot be derived from a
-// greyscale theme), the shadows are black at low alpha (rgba, so they are not hex
-// at all), and everything else must come through the alias map. Each of them is
-// declared exactly once, in the alias block, and is only ever used *mixed into a
-// surface*, which is what keeps it legible in both themes.
-// White used to be on this list as "the foreground on a brand fill" -- which is
-// exactly wrong in the dark theme, where the brand fill IS white and the label
-// vanished. The contrast token is --td-card / --dsw-alias-bg-base instead.
+// Literal colours are the listed exceptions: semantic priority/status hues, the
+// small smart-filter palette, the editorial appearance's cream/ink pair, and the
+// fixed gallery blue with its white on-colour. Those hues cannot be derived from
+// the host's greyscale theme, so each is declared once in the alias block; every
+// other colour must come through the host token map.
+// White is not the foreground for the host's theme-dependent brand fill (which
+// flips to white in dark mode); it is only the label on the fixed gallery-blue
+// accent, declared once as --td-accent-on. That keeps the two contrast roles
+// separate instead of letting a white label disappear on a white brand fill.
 const cssRules = css.replace(/\/\*[\s\S]*?\*\//g, ' ')
+const SMART_ACCENTS = [
+  ['today', 'td-accent'], ['all', 'td-accent'], ['week', 'td-teal'],
+  ['overdue', 'td-danger'], ['inbox', 'td-violet'], ['done', 'td-ok'],
+]
+ok('smart-list accents are mapped by meaning', SMART_ACCENTS.every(([filter, token]) =>
+  new RegExp(`\\[data-smart-filter="${filter}"\\][^{}]*\\{--td-smart-accent:var\\(--${token}\\)\\}`).test(cssRules)),
+SMART_ACCENTS)
+ok('the gallery-blue on-colour is mapped once and not hard-coded on controls',
+  /--td-accent-on\s*:\s*#fff\b/.test(aliasBlock) && !/color\s*:\s*#fff\b/.test(cssRules))
 const LITERAL_COLOURS = new Set([
-  '#8b97a6', '#e0a53c', '#1f9d61', '#e56d24',
-  // 奶白 + 蓝, the floating window's skin: a semantic HUE pair, plus the two ink
-  // tones that keep a light card readable under the dark theme. Same rule as the
-  // four above -- declared once, in the alias block, and only ever used as a
-  // surface or mixed into one.
-  '#fffaf1', '#f6eedd', '#2f6bff', '#16233a', '#4d6076',
+  '#8b97a6', '#e0a53c', '#1f9d61', '#e56d24', '#22a89a', '#7c5cf0',
+  // Editorial's navy/cream palette is deliberately literal because the host's
+  // theme tokens are grayscale. The gallery blue is the shared accent; floating
+  // surfaces read it through the selected appearance map instead of pinning their
+  // own cream skin. White is the blue fill's on-colour, never the host brand.
+  '#fffaf1', '#f6eedd', '#3b82f6', '#145df0', '#496f89', '#b85e53', '#568b83',
+  '#fff', '#16233a', '#4d6076',
 ])
 const literals = [...new Set((cssRules.match(/#[0-9a-fA-F]{3,8}\b/g) ?? []).map((c) => c.toLowerCase()))]
 const stray = literals.filter((c) => !LITERAL_COLOURS.has(c)).sort()
@@ -264,10 +273,14 @@ const marked = new Set(classWindows.filter((set) => set.has(MARKER)).flatMap((se
 ok('the JSX marks the shared surfaces', marked.size >= 6, [...marked].sort())
 
 const seatRule = (test) => topRules.filter((rule) => rule.head.split(',')
-  .some((one) => new RegExp('^\\.' + MARKER + '(?![\\w-])').test(one.trim()))).filter(test)
+  .some((one) => new RegExp('^\\.' + MARKER + '(?![\\w-])').test(one.trim())))
+  // Appearance selectors are intentional token overrides layered on the shared map.
+  .filter((rule) => !/\[data-todo-appearance/.test(rule.head))
+  .filter(test)
 
 // 1. the mechanism itself: the marker carries map + box model + focus ring + baseline.
-ok('the marker declares the token map', seatRule((rule) => /--td-card\s*:/.test(rule.body) && /--td-canvas\s*:/.test(rule.body)).length === 1)
+ok('the marker declares one shared token map, with appearance overrides layered after it',
+  seatRule((rule) => /--td-card\s*:/.test(rule.body) && /--td-canvas\s*:/.test(rule.body)).length === 1)
 ok('the marker resets the box model for its subtree',
   seatRule((rule) => /\*/.test(rule.head) && /box-sizing\s*:\s*border-box/.test(rule.body)).length >= 1)
 ok('the marker draws the focus ring for its subtree',
@@ -487,18 +500,22 @@ ok('no seat root re-declares the map, the box model or the focus ring',
 // 3. the same hole one rename away: a token nothing declares resolves to nothing
 //    just as quietly as one that is declared in an unreachable place.
 //
-// Two names are per-ELEMENT values the JSX writes inline rather than theme tokens:
-// the row's staggered entrance delay and the column's list colour. They are kept as
-// an explicit whitelist whose writers are asserted to exist, so this stays a net
-// for orphans instead of a hole in it.
-const LOCAL_TOKENS = ['--td-delay', '--td-tint']
-const inlineWriters = LOCAL_TOKENS.filter((name) => jsx.includes("'" + name + "'"))
-ok('the per-element tokens are really set inline by the JSX',
-  inlineWriters.length === LOCAL_TOKENS.length, LOCAL_TOKENS.filter((n) => !inlineWriters.includes(n)))
+// These values are intentionally local rather than part of the shared host-token
+// map: row entrance / list tint are inline, smart accents are assigned by the
+// filter-key rules, and editorial's serif stack belongs only to that appearance.
+const INLINE_TOKENS = ['--td-delay', '--td-tint']
+const CSS_LOCAL_TOKENS = ['--td-smart-accent', '--td-serif']
+const LOCAL_TOKENS = [...INLINE_TOKENS, ...CSS_LOCAL_TOKENS]
+const inlineWriters = INLINE_TOKENS.filter((name) => jsx.includes("'" + name + "'"))
+ok('the inline per-element tokens are really set by the JSX',
+  inlineWriters.length === INLINE_TOKENS.length, INLINE_TOKENS.filter((n) => !inlineWriters.includes(n)))
+ok('the smart accent and editorial serif stack have local writers',
+  CSS_LOCAL_TOKENS.every((name) => cssRules.includes(name)))
+ok('the editorial style declares its serif fallback stack', /--td-serif\s*:\s*ui-serif/.test(cssRules))
 const declaredNames = new Set([...aliasBlock.matchAll(/--td-[\w-]+/g)].map((m) => m[0]))
 const consumed = new Set([...css.replace(/\/\*[\s\S]*?\*\//g, ' ').matchAll(/var\((--td-[\w-]+)/g)].map((m) => m[1]))
 const orphans = [...consumed].filter((name) => !declaredNames.has(name) && !LOCAL_TOKENS.includes(name)).sort()
-ok('every consumed token is either mapped or an inline per-element value', orphans.length === 0, orphans)
+ok('every consumed token is mapped or has a local writer', orphans.length === 0, orphans)
 
 // 5. the two global layers keep a real surface: a mask, a card, a radius, a shadow.
 ok('the capture layer paints a mask, a card, a radius and a shadow',
@@ -512,34 +529,36 @@ ok('the command palette paints a mask, a card, a radius and a shadow',
   && /\.td-cmdk\{[^}]*border-radius:var\(--td-r-lg\)/.test(css)
   && /\.td-cmdk\{[^}]*box-shadow:var\(--td-sh-2\)/.test(css))
 
-// 6. the dark theme re-points the SAME marked surfaces: one selector on the marker,
-//    with the cream window guarded out. The old sheet listed the elements twice and
-//    the two lists had to agree by hand -- which is how a theme ends up applied to
-//    one surface and not another.
+// 6. the dark theme reaches the same marked surfaces, including both parts of the
+//    floating window; appearance-specific maps then keep flat/editorial coherent.
 const darkRule = topRules.find((rule) => /data-ds-dark-theme/.test(rule.head) && /--td-card\s*:/.test(rule.body))
 const darkHead = darkRule === undefined ? '' : darkRule.head
 const darkClasses = new Set(selectorClasses(darkHead))
 ok('the dark override is declared on the seat marker', darkClasses.has(MARKER), darkHead)
-ok('the dark override keeps the cream floating window out, both guards intact',
-  /:not\(\.td-floatapp\)/.test(darkHead) && /:not\(\.td-float\)/.test(darkHead), darkHead)
+ok('the dark override includes floating seats instead of excluding them',
+  darkClasses.has(MARKER) && !/:not\(\.td-float(?:app)?\)/.test(darkHead), darkHead)
 // Anything else the dark list names has to be marked as well, so the list cannot
-// grow into the place a new surface gets added: a redundant selector is tolerable
-// (verify-client-render V4 pins one legacy line), a coverage hole is not.
+// grow into the place a new surface gets added without carrying the shared tokens.
 ok('everything the dark override names is also marked',
   [...darkClasses].every((cls) => marked.has(cls)), [...darkClasses].filter((cls) => !marked.has(cls)))
 ok('the dark override does not spread to unmarked classes',
   [...darkClasses].every((cls) => cls === MARKER || cls === 'td-root'), [...darkClasses].sort())
-const skinRule = topRules.find((rule) => /--td-canvas:var\(--td-cream-2\)/.test(rule.body))
-ok('the floating window re-declares its own colours after the shared map',
-  skinRule !== undefined && aliasRule !== undefined && topRules.indexOf(aliasRule) < topRules.indexOf(skinRule))
-ok('the floating window pins the colours the shared map would otherwise win',
-  skinRule !== undefined && /--td-card\s*:\s*var\(--td-cream\)/.test(skinRule.body)
-  && /--td-text\s*:\s*var\(--td-ink\)/.test(skinRule.body) && /--td-brand\s*:\s*var\(--td-accent\)/.test(skinRule.body))
-// The frame and the interior are two elements: the window's own box is .td-float, the
-// app inside it is .td-root.td-floatapp. Both must stay cream, which needs both guards
-// above AND the marker on both elements.
-ok('both elements of the floating window are marked and both stay out of the dark map',
-  marked.has('td-float') && marked.has('td-floatapp') && !darkClasses.has('td-floatapp'), [...marked].sort())
+const floatFrame = topRules.find((rule) => rule.head === '.td-float')
+ok('the floating frame uses the shared hairline and appearance radius',
+  floatFrame !== undefined && /border:1px solid var\(--td-line-2\)/.test(floatFrame.body)
+  && /border-radius:var\(--td-r-lg\)/.test(floatFrame.body), floatFrame?.body)
+const floatOwnPalette = topRules.filter((rule) => rule.head.split(',').some((selector) =>
+  /^\.td-float(?:$|[.#\s])/.test(selector.trim())))
+  .some((rule) => /--td-(?:canvas|card|soft|field|line|line-2|text|text-2|text-3|brand)\s*:/.test(rule.body))
+ok('the floating frame does not declare a third token palette', !floatOwnPalette)
+ok('flat dark tokens also reach floating seats',
+  topRules.some((rule) => rule.head === 'body[data-ds-dark-theme] .td-seat[data-todo-appearance="flat"]'))
+ok('editorial dark tokens also reach floating seats',
+  topRules.some((rule) => rule.head === 'body[data-ds-dark-theme] .td-seat[data-todo-appearance="editorial"]'))
+// The frame and interior are separate seats; both must carry the marker so each
+// can read the selected appearance and host theme without inheriting across slots.
+ok('both floating-window elements are marked and participate in the dark map',
+  marked.has('td-float') && marked.has('td-floatapp') && darkClasses.has(MARKER), [...marked].sort())
 
 console.log('')
 if (fail > 0) {

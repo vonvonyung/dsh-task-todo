@@ -22,6 +22,7 @@ const GATES = [
   ['store, filters and view payloads', 'test-store.mjs'],
   ['markdown todo import (mapping, idempotency, dry run)', 'test-import-markdown.mjs'],
   ['plugin settings (document, layering, form payload, secret)', 'test-settings.mjs'],
+  ['monthly plan workbook export (local data, aggregation, template structure)', 'test-plansheet.mjs'],
   ['Feishu Bitable sync (mapping, diff, transport, idempotency)', 'test-feishu.mjs'],
   ['lossless JSON over every tool / HTTP / command surface', 'test-json-gate.mjs'],
   ['client render, registration and interactions', 'verify-client-render.mjs'],
