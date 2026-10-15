@@ -1247,7 +1247,8 @@ await settleAll(3)
 ok('the header opens a frame-wide appearance dialog',
   overlay.byClass('td-style-modal').length === 1
   && overlay.byClass('td-modal-layer').some((node) => node.props['data-todo-appearance'] === 'flat'))
-eq('the picker exposes exactly the two approved styles', overlay.byClass('td-style-choice').length, 2)
+eq('the picker exposes exactly the three approved styles', overlay.byClass('td-style-choice').length, 3)
+eq('the playful choice renders its own CSS preview class', overlay.byClass('td-style-mini-playful').length, 1)
 eq('the picker marks flat as the active style', styleOption('简洁扁平').props['aria-pressed'], 'true')
 ok('the editorial style is directly selectable', styleOption('杂志编辑') !== undefined)
 styleOption('杂志编辑').props.onClick({})
@@ -1259,6 +1260,15 @@ ok('a re-query keeps the saved editorial appearance',
 ui.byClass('td-icon').find((node) => node.props['aria-label'] === '重新载入').props.onClick({})
 await settleAll(3)
 eq('reloading state preserves the selected appearance', panelRoot().props['data-todo-appearance'], 'editorial')
+styleButton().props.onClick({})
+await settleAll(2)
+ok('the playful quest style is directly selectable', styleOption('活力闯关') !== undefined)
+styleOption('活力闯关').props.onClick({})
+await settleAll(4)
+eq('selecting playful saves it through the real settings API', (await api('settings')).values.appearance, 'playful')
+eq('the active panel switches to the playful theme immediately', panelRoot().props['data-todo-appearance'], 'playful')
+ok('the playful choice survives a fresh state read',
+  (await api('state')).settings.appearance === 'playful')
 styleButton().props.onClick({})
 await settleAll(2)
 styleOption('简洁扁平').props.onClick({})
@@ -3266,6 +3276,21 @@ section('visual system v2 (computed, not rendered)')
       /\.td-seat\[data-todo-appearance="flat"\]\{[^}]*--td-accent:#145df0/.test(rules))
     ok('the editorial theme uses its restrained steel blue',
       /\.td-seat\[data-todo-appearance="editorial"\]\{[^}]*--td-accent:#496f89/.test(rules))
+    const playfulTokens = bodyOf('.td-seat[data-todo-appearance="playful"]') ?? ''
+    const playfulRows = bodyOf('.td-seat[data-todo-appearance="playful"] .td-item') ?? ''
+    const playfulButtons = bodyOf('.td-seat[data-todo-appearance="playful"] .td-btn') ?? ''
+    ok('the playful theme uses the owl-green primary and snow-white canvas',
+      /--td-accent:#58cc02/.test(playfulTokens) && /--td-canvas:#fff/.test(playfulTokens))
+    ok('playful task rows have thick borders, rounded cards, and tactile shadows',
+      /border-bottom-width:4px/.test(playfulRows) && /border-radius:14px/.test(playfulRows)
+      && /0 4px 0 var\(--td-playful-depth\)/.test(playfulRows))
+    ok('playful buttons use bold type and a pressable 4px lower edge',
+      /border-bottom-width:4px/.test(playfulButtons) && /font-weight:800/.test(playfulButtons))
+    ok('the playful palette adapts its surfaces to DSH dark mode',
+      /body\[data-ds-dark-theme\] \.td-seat\[data-todo-appearance="playful"\]\{[^}]*--td-playful-white:var\(--dsw-alias-bg-layer-1\)/.test(rules))
+    ok('the style picker lays out three choices and previews the playful sample',
+      /\.td-style-options\{[^}]*grid-template-columns:repeat\(3,/.test(rules)
+      && /\.td-style-mini\.td-style-mini-playful\{[^}]*--mini-accent:#58cc02/.test(rules))
     ok('the floating frame uses the shared hairline, radius and shadow',
       /\.td-float\{[^}]*border:1px solid var\(--td-line-2\)[^}]*border-radius:var\(--td-r-lg\)[^}]*box-shadow:var\(--td-sh-2\)/.test(rules))
     ok('the floating frame does not pin a third token palette',
@@ -3345,8 +3370,8 @@ const inputFor = (label) => ui.byClass('td-set-input').find((n) => n.props['aria
 const boxFor = (label) => ui.byClass('td-set-check').find((n) => n.props['aria-label'] === label)
 ok('the plugin settings page exposes the appearance preference', inputFor('界面风格')?.tag === 'select')
 eq('the settings form starts with the saved flat theme', inputFor('界面风格')?.props.value, 'flat')
-eq('both theme names are human-readable in the form',
-  inputFor('界面风格')?.children.map((option) => ui.text(option)), ['简洁扁平', '杂志编辑'])
+eq('all three theme names are human-readable in the form',
+  inputFor('界面风格')?.children.map((option) => ui.text(option)), ['简洁扁平', '杂志编辑', '活力闯关'])
 ok('the App ID input exists', inputFor('App ID') !== undefined)
 ok('the app_token input exists', inputFor('多维表格 app_token') !== undefined)
 eq('the secret renders as a password field', inputFor('App Secret').props.type, 'password')
@@ -3392,6 +3417,11 @@ await ui.settle(2)
 eq('the settings form previews the chosen appearance', ui.byClass('td-set')[0].props['data-todo-appearance'], 'editorial')
 await press('保存')
 eq('saving the settings form persists the editorial appearance', (await api('settings')).values.appearance, 'editorial')
+inputFor('界面风格').props.onChange({ target: { value: 'playful' } })
+await ui.settle(2)
+eq('the settings form previews the playful appearance', ui.byClass('td-set')[0].props['data-todo-appearance'], 'playful')
+await press('保存')
+eq('saving the settings form persists the playful appearance', (await api('settings')).values.appearance, 'playful')
 inputFor('界面风格').props.onChange({ target: { value: 'flat' } })
 await ui.settle(2)
 await press('保存')
