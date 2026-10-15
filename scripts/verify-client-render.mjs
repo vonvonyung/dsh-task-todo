@@ -1879,9 +1879,23 @@ section('gantt view')
 ui.clickable(ui.find('甘特')).props.onClick({})
 await ui.settle()
 ok('the gantt draws a day header row', ui.byClass('td-gantt-cell').length >= 30, ui.byClass('td-gantt-cell').length)
-ok('the Gantt timeline sits inside a vertically scrollable view container',
-  ui.byClass('td-gantt')[0]?.parent?.parent?.props.className === 'td-scroll',
-  ui.byClass('td-gantt')[0]?.parent?.parent?.props.className)
+const ganttLeftPane = ui.byClass('td-gantt-l')[0]
+const ganttRightPane = ui.byClass('td-gantt-r')[0]
+const ganttCss = document._head.children[0].textContent
+ok('Gantt records scroll inside synchronized task and timeline panes while headers stay pinned',
+  /\.td-gantt-l\{[^}]*overflow-y:auto[^}]*\}/.test(ganttCss)
+  && /\.td-gantt-r\{[^}]*overflow-y:auto[^}]*\}/.test(ganttCss)
+  && /\.td-gantt-th\{[^}]*position:sticky[^}]*top:0/.test(ganttCss)
+  && /\.td-gantt-hd\{[^}]*position:sticky[^}]*top:0/.test(ganttCss)
+  && typeof ganttLeftPane?.props.onScroll === 'function'
+  && typeof ganttRightPane?.props.onScroll === 'function',
+  { left: ganttLeftPane?.props.className, right: ganttRightPane?.props.className })
+ganttLeftPane.scrollTop = 96
+ganttLeftPane.props.onScroll({ currentTarget: ganttLeftPane })
+ok('scrolling task names moves the matching timeline rows', ganttRightPane.scrollTop, 96)
+ganttRightPane.scrollTop = 144
+ganttRightPane.props.onScroll({ currentTarget: ganttRightPane })
+ok('scrolling timeline rows moves the matching task names', ganttLeftPane.scrollTop, 144)
 ok('the gantt draws task rows on the left', ui.byClass('td-gantt-row').length >= 3)
 ok('the gantt draws bars', ui.byClass('td-gantt-bar').length >= 2, ui.byClass('td-gantt-bar').length)
 ok('the gantt shows the window range', /\d{4}-\d{2}-\d{2} → \d{4}-\d{2}-\d{2}/.test(ui.text()), ui.text().slice(0, 120))
