@@ -83,6 +83,8 @@ const plain = fresh()
 eq('with no file, the schema defaults win', plain.settings.feishu.enabled, false)
 eq('the default interface style is the approved flat theme', plain.settings.appearance, 'flat')
 eq('the default key field is 任务ID', plain.settings.feishu.keyField, '任务ID')
+eq('trash auto-purge defaults to disabled', plain.settings.trashRetentionDays, 0)
+eq('completed-task auto-archive defaults to disabled', plain.settings.archiveAfterDays, 0)
 
 const seeded = fresh({ hostConfig: { weekStart: 0, badgeCount: 'overdue', feishu: { appId: 'from-patch' } } })
 eq('the entry config seeds a scalar', seeded.settings.weekStart, 0)
@@ -108,6 +110,7 @@ eq('there is no error on a clean read', form.error, null)
 eq('the groups are the schema groups', form.groups.map((g) => g.key), ['', 'hotkey', 'feishu'])
 const paths = form.groups.flatMap((g) => g.fields.map((f) => f.path))
 for (const expected of ['appearance', 'enabled', 'dataFile', 'weekStart', 'defaultList', 'badgeCount',
+  'trashRetentionDays', 'archiveAfterDays',
   'hotkey.capture', 'hotkey.palette', 'feishu.enabled', 'feishu.appId', 'feishu.appSecret',
   'feishu.appToken', 'feishu.tableId', 'feishu.baseUrl', 'feishu.autoSync', 'feishu.syncSubtasks',
   'feishu.includeDone', 'feishu.deleteRemoved', 'feishu.keyField']) {
@@ -119,7 +122,17 @@ eq('every field carries a type', fields.every((f) => ['string', 'boolean', 'numb
 eq('the badge measure renders as a select', fields.find((f) => f.path === 'badgeCount').options, ['today', 'overdue', 'open'])
 eq('both approved interface styles are selectable', fields.find((f) => f.path === 'appearance').options, ['flat', 'editorial'])
 eq('the week start renders as a select', fields.find((f) => f.path === 'weekStart').options, [1, 0])
+eq('trash retention is a numeric setting', fields.find((f) => f.path === 'trashRetentionDays').type, 'number')
+eq('trash retention allows zero to disable it',
+  [fields.find((f) => f.path === 'trashRetentionDays').minimum, fields.find((f) => f.path === 'trashRetentionDays').maximum],
+  [0, 3650])
+eq('archive retention is a numeric setting', fields.find((f) => f.path === 'archiveAfterDays').type, 'number')
+eq('archive retention allows zero to disable it',
+  [fields.find((f) => f.path === 'archiveAfterDays').minimum, fields.find((f) => f.path === 'archiveAfterDays').maximum],
+  [0, 3650])
 eq('a boolean field is typed as one', fields.find((f) => f.path === 'feishu.enabled').type, 'boolean')
+eq('the settings view exposes both lifecycle defaults',
+  [plain.settingsView().trashRetentionDays, plain.settingsView().archiveAfterDays], [0, 0])
 gate('the settings payload is lossless JSON', form)
 gate('the state payload is lossless JSON', plain.state())
 
@@ -190,6 +203,35 @@ moved.applySettings({ dataFile: movedFile })
 eq('the store follows the setting', moved.dataFile(), movedFile)
 moved.require().create({ title: '写在移动后的文件里' })
 ok('the task landed in the configured file', fs.existsSync(movedFile))
+
+console.log('--- lifecycle retention settings take effect and default to off ---')
+const retentionFile = fileOf('retention-settings.json')
+const retention = new TodoService(null, quiet, { settingsFile: retentionFile })
+retention.applySettings({ dataFile: fileOf('retention-tasks.json') })
+const retentionStore = retention.require()
+const agedDone = retentionStore.create({
+  id: 't_retention_done', title: '久远的完成任务', done: true,
+  completedAt: '2020-01-01T00:00:00', createdAt: '2019-12-31T00:00:00',
+})
+const openRetentionTask = retentionStore.create({ id: 't_retention_open', title: '未完成不归档' })
+const agedTrash = retentionStore.create({ id: 't_retention_trash', title: '久远的回收站任务' })
+retentionStore.moveToTrash(agedTrash.id, { at: '2020-01-02T00:00:00' })
+const currentTrash = retentionStore.create({ id: 't_retention_current', title: '新近的回收站任务' })
+retentionStore.moveToTrash(currentTrash.id)
+const retentionSave = retention.updateSettings({ archiveAfterDays: 30, trashRetentionDays: 30 })
+eq('retention settings are saved to the form payload',
+  [retentionSave.values.archiveAfterDays, retentionSave.values.trashRetentionDays], [30, 30])
+ok('enabling retention archives only old completed tasks',
+  retentionStore.getArchived(agedDone.id)?.done === true
+  && retentionStore.get(openRetentionTask.id)?.title === '未完成不归档')
+ok('enabling trash retention permanently clears expired tasks only',
+  retentionStore.getAny(agedTrash.id) === null
+  && retentionStore.getTrashed(currentTrash.id)?.title === '新近的回收站任务')
+ok('auto-purging leaves the tombstone needed by Feishu conflict handling',
+  retentionStore.tombstones().includes(agedTrash.id))
+const boundedRetention = retention.updateSettings({ archiveAfterDays: -5, trashRetentionDays: 99999 })
+eq('retention settings are clamped to their documented range',
+  [boundedRetention.values.archiveAfterDays, boundedRetention.values.trashRetentionDays], [0, 3650])
 
 console.log('--- disabling the plugin is a real gate ---')
 const off = fresh()
