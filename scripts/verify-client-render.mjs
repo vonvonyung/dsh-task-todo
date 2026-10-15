@@ -142,8 +142,12 @@ function createRoot() {
       // attaching a ref and asking whether a click landed inside its own row.
       tagName: typeof type === 'string' ? String(type).toUpperCase() : '',
       props: node.props ?? {},
-      // React 19 moved `ref` into props; reading `element.ref` warns.
-      ref: node.props?.ref ?? null,
+      // React 19 moved `ref` into props; in React 18 it remains on the element.
+      // Only read the legacy property on React versions where it is still public,
+      // avoiding React 19's deprecation getter warning.
+      ref: Number.parseInt(realReact.version, 10) >= 19
+        ? (node.props?.ref ?? null)
+        : (node.ref ?? null),
       parent: null,
       children: list.flatMap((child, i) => {
         const walked = walk(child, `${pathArg}/${i}`)
@@ -485,7 +489,7 @@ const hostMod = await import(pathToFileURL(path.join(pkgRoot, 'lib', 'index.js')
 hostMod.apply(hostCtx)
 
 ok('host registered its HTTP route', route !== null && route.path === '/todo')
-ok('host registered seven tools', tools.length === 7, tools.map((t) => t.name))
+ok('host registered ten tools including archive/trash operations', tools.length === 10, tools.map((t) => t.name))
 
 let hostState = { lists: [], tasks: [] }
 const server = http.createServer((req, res) => {
@@ -653,6 +657,66 @@ const testWindow = {
     return true
   },
 }
+const uiFeishuMock = {
+  enabled: false, enableEntry: false, busyReplies: 0, syncCalls: [], applyCalls: [], entryCalls: [], resolveCalls: [],
+  conflicts: [], syncPreview: null, syncActual: null, applyPreview: null, applyActual: null,
+}
+const nativeFetch = globalThis.fetch
+async function browserFetch(url, init) {
+  const pathname = new URL(String(url), BASE).pathname
+  const respond = (data) => new Response(JSON.stringify({ ok: true, data }), {
+    status: 200, headers: { 'content-type': 'application/json; charset=utf-8' },
+  })
+  if (uiFeishuMock.enabled && uiFeishuMock.enableEntry && pathname === '/todo/api/state') {
+    const response = await nativeFetch(String(url).startsWith('http') ? url : BASE + url, init)
+    const payload = await response.json()
+    if (payload?.data?.settings?.feishu) payload.data.settings.feishu.enabled = true
+    return new Response(JSON.stringify(payload), { status: 200, headers: { 'content-type': 'application/json; charset=utf-8' } })
+  }
+  if (uiFeishuMock.enabled && pathname === '/todo/api/feishuEntrySync') {
+    const args = JSON.parse(init?.body ?? '{}')
+    uiFeishuMock.entryCalls.push(args)
+    const response = await nativeFetch(`${BASE}/todo/api/state`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(args),
+    })
+    const payload = await response.json()
+    const state = payload.data
+    if (state?.settings?.feishu) state.settings.feishu.enabled = true
+    const busy = uiFeishuMock.busyReplies > 0
+    if (busy) uiFeishuMock.busyReplies--
+    return respond({
+      enabled: true, ok: true, busy, stale: false, at: '2026-10-15T00:00:00.000Z',
+      imported: 0, remoteUpdated: 0, remoteUpdatedFields: 0,
+      pull: { remote: 0, holes: 0, created: 0, notRestored: [], unlinkedParents: [], skipped: [] },
+      sync: { created: 0, updated: 0, deleted: 0, skippedConflicts: uiFeishuMock.conflicts.length, conflicts: uiFeishuMock.conflicts },
+      conflicts: uiFeishuMock.conflicts,
+      state,
+    })
+  }
+  if (uiFeishuMock.enabled && pathname === '/todo/api/feishuResolveConflict') {
+    const args = JSON.parse(init?.body ?? '{}')
+    uiFeishuMock.resolveCalls.push(args)
+    const response = await nativeFetch(`${BASE}/todo/api/state`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(args),
+    })
+    const payload = await response.json()
+    if (payload?.data?.settings?.feishu) payload.data.settings.feishu.enabled = true
+    uiFeishuMock.conflicts = []
+    return respond({ resolved: true, key: args.key, field: args.field, operation: args.operation, direction: args.direction, state: payload.data })
+  }
+  if (uiFeishuMock.enabled && pathname === '/todo/api/syncFeishu') {
+    const args = JSON.parse(init?.body ?? '{}')
+    uiFeishuMock.syncCalls.push(args)
+    return respond(args.dryRun === true ? uiFeishuMock.syncPreview : uiFeishuMock.syncActual)
+  }
+  if (uiFeishuMock.enabled && pathname === '/todo/api/feishuApplyRemote') {
+    const args = JSON.parse(init?.body ?? '{}')
+    uiFeishuMock.applyCalls.push(args)
+    return respond(args.dryRun === true ? uiFeishuMock.applyPreview : uiFeishuMock.applyActual)
+  }
+  return nativeFetch(String(url).startsWith('http') ? url : BASE + url, init)
+}
+
 const sandbox = {
   window: testWindow,
   Event: HarnessEvent,
@@ -689,7 +753,7 @@ const sandbox = {
   parseFloat,
   // The client calls a RELATIVE url (as a browser does); in Node that needs the
   // loopback base in front of it.
-  fetch: (url, init) => fetch(String(url).startsWith('http') ? url : BASE + url, init),
+  fetch: browserFetch,
   require: (id) => {
     requireCalls.push(id)
     if (id === 'react') return React
@@ -845,12 +909,63 @@ ok('the current disposer removes its own registration',
 
   const reconcileText = builders.reconcileLines({
     local: 2, remote: 4, keyed: 4, unkeyed: 0, identical: 1,
-    differing: [{ key: 't_a', title: 'A', fields: ['标题'] }],
+    differing: [{
+      key: 't_a', title: 'A', fields: ['标题'],
+      changes: [
+        { field: '标题', local: '本地标题', remote: '飞书标题', direction: 'both' },
+        { field: '备注', local: '本地备注', remote: '飞书备注', direction: 'both' },
+        { field: '状态', local: '本地状态', remote: '飞书状态', direction: 'both' },
+        { field: '优先级', local: '本地优先级', remote: '飞书优先级', direction: 'both' },
+        { field: '父任务', local: '本地父项', remote: '飞书父项', direction: 'both' },
+      ],
+    }],
     localOnly: [{ key: 't_b', title: 'B' }], remoteOnly: [{ key: 't_c', title: 'C' }],
     columns: { present: [], missing: [] }, keyField: '任务ID',
   }).join(' / ')
   ok('the reconcile report never says undefined', !reconcileText.includes('undefined'), reconcileText)
   ok('and it points at the pull for remote-only rows', reconcileText.includes('从飞书补洞'), reconcileText)
+  ok('the reconcile report includes both values and the conflict direction',
+    reconcileText.includes('本地标题') && reconcileText.includes('飞书标题') && reconcileText.includes('两端变更'), reconcileText)
+  ok('the complete matching-row report does not truncate later differing fields',
+    reconcileText.includes('父任务') && reconcileText.includes('飞书父项'), reconcileText)
+
+  const conflictText = builders.syncLines({
+    blocked: true, local: 1, remote: 1, conflicts: [{ key: 't_a', title: 'A', changes: [
+      { field: '标题', local: '本地标题', remote: '飞书标题', reason: 'both' },
+      { field: '备注', local: '本地备注', remote: '飞书备注', reason: 'both' },
+      { field: '状态', local: '本地状态', remote: '飞书状态', reason: 'both' },
+      { field: '优先级', local: '本地优先级', remote: '飞书优先级', reason: 'both' },
+    ] }], unmanaged: 0,
+  }).join(' / ')
+  ok('the blocked-sync report includes values and prevents silent overwrite',
+    conflictText.includes('未写入远端') && conflictText.includes('本地标题') && conflictText.includes('飞书标题'), conflictText)
+  ok('the conflict report does not truncate later differing fields',
+    conflictText.includes('本地优先级') && conflictText.includes('飞书优先级'), conflictText)
+  const deleteConflictText = builders.syncLines({
+    blocked: true, local: 0, remote: 1, conflicts: [{
+      key: 't_deleted', title: '已删除任务', operation: 'delete', changes: [
+        { field: '备注', local: '（本地已删除）', remote: '飞书新备注', reason: 'remote' },
+      ],
+    }], unmanaged: 0,
+  }).join(' / ')
+  ok('the conflict report distinguishes a deletion conflict and tells how to keep the row',
+    deleteConflictText.includes('删除冲突') && deleteConflictText.includes('从飞书补洞')
+    && deleteConflictText.includes('飞书新备注'), deleteConflictText)
+
+  const applyRemoteText = builders.applyRemoteLines({
+    dryRun: true, matched: 1, differing: 1, planned: 1, updated: 0, updatedFields: 0,
+    previewToken: 'preview-token', items: [{ key: 't_a', title: 'A', changes: [
+      { field: '标题', local: '本地标题', remote: '飞书标题', applied: true, reason: '' },
+      { field: '备注', local: '本地备注', remote: '飞书备注', applied: true, reason: '' },
+      { field: '状态', local: '本地状态', remote: '飞书状态', applied: false, reason: '派生字段' },
+      { field: '重复', local: '本地规则', remote: '飞书规则', applied: false, reason: '摘要文本' },
+      { field: '优先级', local: '中', remote: '高', applied: true, reason: '' },
+    ] }], skipped: [], notApplied: ['重复'], missingColumns: [], createdLists: [],
+  }).join(' / ')
+  ok('the apply-remote preview shows the field values and requires confirmation',
+    applyRemoteText.includes('本地标题') && applyRemoteText.includes('飞书标题') && applyRemoteText.includes('预览'), applyRemoteText)
+  ok('the apply-remote preview exposes all changed fields, including later supported/unsupported ones',
+    applyRemoteText.includes('飞书规则') && applyRemoteText.includes('优先级：中 → 高'), applyRemoteText)
 
   const pullText = builders.pullLines({
     dryRun: true, planned: 1, created: 0, remote: 4, holes: 1,
@@ -919,13 +1034,109 @@ const Panel = seat('main').Component
 const Overlay = seat('shell.overlay').Component
 const Icon = seat('sidebar.panellist').Component
 
+// The browser mock advertises a configured Feishu target and lets the initial
+// entry reconciliation be asserted without touching a real table.
+uiFeishuMock.enabled = true
+uiFeishuMock.enableEntry = true
+// The first background check returns a conflict: the dialog must remain closed
+// until the user chooses to open it from the compact header status control.
+uiFeishuMock.conflicts = [{
+  key: 't_ui_conflict', title: '离线冲突任务', fields: ['标题', '完成记录', '关联跟进'],
+  changes: [
+    { field: '标题', local: '本地离线标题', remote: '飞书离线标题', reason: 'both', remoteCanApply: true },
+    { field: '完成记录', local: '', remote: '2026-10-14 19:58:07｜已初步检查，需要再检验。', reason: 'remote', remoteCanApply: true },
+    { field: '关联跟进', local: '', remote: '跟进任务：人社大厅叫号屏维修（t_mv822wxi15n5；未完成；截止 2026-10-15）', reason: 'remote', remoteCanApply: true },
+  ],
+}]
 ui.render(React.createElement(Panel, {}))
 overlay.render(React.createElement(Overlay, {}))
 ok('the first paint says it is loading', ui.text().includes('正在载入待办任务'), ui.text().slice(0, 80))
 await ui.settle()
 ok('after the first fetch the shell renders', ui.find('待办任务') !== undefined, ui.text().slice(0, 120))
 ok('the empty state explains the rapid-add syntax', ui.text().includes('在下面一行直接输入'), ui.text().slice(0, 200))
-ok('the overlay seat renders nothing while idle', overlay.byClass('td-modal').length === 0)
+ok('entering the task view starts one background Feishu check', uiFeishuMock.entryCalls.length === 1, uiFeishuMock.entryCalls)
+ok('the task view has no persistent conflict banner above its content',
+  ui.byClass('td-feishu-syncbar').length === 0 && ui.find('全部任务') !== undefined,
+  ui.byClass('td-feishu-syncbar').length)
+const feishuTrigger = ui.byClass('td-feishu-trigger')[0]
+ok('the header exposes a compact Feishu status control', feishuTrigger !== undefined)
+ok('background conflicts update the status without auto-opening a dialog',
+  feishuTrigger !== undefined && ui.text(feishuTrigger).includes('冲突 1') && overlay.byClass('td-feishu-sync-dialog').length === 0,
+  { label: feishuTrigger === undefined ? null : ui.text(feishuTrigger), dialogs: overlay.byClass('td-feishu-sync-dialog').length })
+feishuTrigger?.props.onClick({})
+await ui.settle()
+ok('clicking the compact status opens the conflict dialog on demand',
+  overlay.byClass('td-feishu-sync-dialog').length === 1 && overlay.byClass('td-feishu-conflict').length === 1)
+ok('the opened conflict dialog shows both preserved values',
+  overlay.text().includes('本地离线标题') && overlay.text().includes('飞书离线标题'))
+const structuredChoiceFor = (field) => {
+  const row = overlay.byClass('td-feishu-field-conflict').find((node) =>
+    overlay.text(node.children?.[0]?.children?.[0]) === field)
+  return row?.children?.[1]?.children?.find((node) =>
+    typeof node !== 'string' && node.tag === 'button' && overlay.text(node) === '采用飞书')
+}
+for (const field of ['完成记录', '关联跟进']) {
+  const choice = structuredChoiceFor(field)
+  ok(`${field} conflicts expose an enabled Feishu choice when the remote summary is reversible`,
+    choice !== undefined && choice.props.disabled !== true, choice?.props)
+}
+const applyFeishuChoice = overlay.byClass('td-feishu-choice').flatMap((node) => node.children)
+  .find((node) => typeof node !== 'string' && node.tag === 'button' && overlay.text(node) === '采用飞书')
+ok('field conflicts offer a direct Feishu-side choice', applyFeishuChoice !== undefined)
+applyFeishuChoice?.props.onClick({})
+await ui.settle()
+ok('the Feishu-side choice calls the exact conflict resolver',
+  uiFeishuMock.resolveCalls.at(-1)?.direction === 'remote'
+  && uiFeishuMock.resolveCalls.at(-1)?.field === '标题'
+  && uiFeishuMock.resolveCalls.at(-1)?.expected?.local === '本地离线标题'
+  && uiFeishuMock.resolveCalls.at(-1)?.expected?.remote === '飞书离线标题',
+  uiFeishuMock.resolveCalls.at(-1))
+ok('a resolved field is removed from the pending conflict list', overlay.byClass('td-feishu-conflict').length === 0)
+ok('the resolver rechecks after applying the user choice', uiFeishuMock.entryCalls.length >= 2, uiFeishuMock.entryCalls.length)
+uiFeishuMock.conflicts = [{
+  key: 't_ui_timestamp', title: '手动编辑更新时间', fields: ['更新时间'],
+  changes: [{ field: '更新时间', local: '2026-10-14T22:36:42', remote: '2026-10-14T23:36:42', reason: 'unknown', remoteCanApply: true }],
+}]
+const syncDialogButtons = () => {
+  const dialog = overlay.byClass('td-feishu-sync-dialog')[0]
+  if (dialog === undefined) return []
+  const insideDialog = (node) => {
+    let parent = node.parent
+    while (parent !== null && parent !== undefined) {
+      if (parent === dialog) return true
+      parent = parent.parent
+    }
+    return false
+  }
+  return overlay.tag('button').filter(insideDialog)
+}
+const timestampRefreshButton = syncDialogButtons()
+  .find((node) => typeof node !== 'string' && node.tag === 'button' && overlay.text(node) === '重新检查')
+timestampRefreshButton?.props.onClick({})
+await ui.settle()
+const applyTimestampChoice = overlay.byClass('td-feishu-choice').flatMap((node) => node.children)
+  .find((node) => typeof node !== 'string' && node.tag === 'button' && overlay.text(node) === '采用飞书')
+ok('a valid manually edited Feishu timestamp can be explicitly adopted',
+  applyTimestampChoice !== undefined && applyTimestampChoice.props.disabled !== true,
+  applyTimestampChoice?.props)
+const entryCallsBeforeBusy = uiFeishuMock.entryCalls.length
+uiFeishuMock.busyReplies = 1
+const busyRefreshButton = syncDialogButtons()
+  .find((node) => typeof node !== 'string' && node.tag === 'button' && overlay.text(node) === '重新检查')
+busyRefreshButton?.props.onClick({})
+await ui.settle()
+ok('a queued entry result clearly reports that another sync is still running',
+  overlay.text().includes('正在后台检查飞书'))
+await ui.wait(1350)
+await ui.settle()
+ok('the task view retries after a busy response and clears the busy state',
+  uiFeishuMock.entryCalls.length === entryCallsBeforeBusy + 2
+  && !overlay.text().includes('正在后台检查飞书'), uiFeishuMock.entryCalls.length - entryCallsBeforeBusy)
+const closeFeishuDialog = syncDialogButtons()
+  .find((node) => node.props['aria-label'] === '关闭')
+closeFeishuDialog?.props.onClick({})
+await ui.settle()
+ok('closing the Feishu dialog leaves the overlay seat idle', overlay.byClass('td-modal').length === 0)
 ok('the smart-list rail is present',
   ui.byClass('td-side').length >= 6, ui.byClass('td-side').length)
 const smartRailKeys = ui.byClass('td-side')
@@ -952,6 +1163,23 @@ ok('the view switcher lives in the rail',
   ['列表', '看板', '日历', '甘特'].every((label) => ui.byClass('td-side').some((n) => ui.text(n).includes(label))),
   ui.byClass('td-side').length)
 ok('the rail offers an inline new-list row', ui.text().includes('新建清单'))
+const collectionKeys = ui.byClass('td-collection-filter')
+  .map((node) => node.props['data-collection-filter'])
+eq('the rail exposes both lifecycle collections', collectionKeys, ['archive', 'trash'])
+ok('collection controls are initially unselected and accessible',
+  collectionKeys.every((key) => ui.byClass('td-collection-filter')
+    .find((node) => node.props['data-collection-filter'] === key)?.props['aria-pressed'] === 'false'))
+ui.byClass('td-collection-filter').find((node) => node.props['data-collection-filter'] === 'archive').props.onClick({})
+await ui.settle()
+ok('the archive collection opens as a list with its own empty state',
+  ui.text().includes('归档中还没有任务。'))
+ui.byClass('td-collection-filter').find((node) => node.props['data-collection-filter'] === 'trash').props.onClick({})
+await ui.settle()
+ok('the recycle bin has a distinct empty state', ui.text().includes('回收站是空的。'))
+ui.byClass('td-side').find((node) => node.props['data-smart-filter'] === 'all').props.onClick({})
+await ui.settle()
+ok('returning to a smart list leaves collection mode',
+  ui.byClass('td-collection-filter').every((node) => node.props['aria-pressed'] === 'false'))
 // The data block is folded by default (v2 / §5.2.1): it is read once and then
 // never again, and unfolded it was 96px of a 680px rail. Its contents are
 // asserted through the toggle, which is the only way to reach them now.
@@ -1019,7 +1247,8 @@ await settleAll(3)
 ok('the header opens a frame-wide appearance dialog',
   overlay.byClass('td-style-modal').length === 1
   && overlay.byClass('td-modal-layer').some((node) => node.props['data-todo-appearance'] === 'flat'))
-eq('the picker exposes exactly the two approved styles', overlay.byClass('td-style-choice').length, 2)
+eq('the picker exposes exactly the three approved styles', overlay.byClass('td-style-choice').length, 3)
+eq('the playful choice renders its own CSS preview class', overlay.byClass('td-style-mini-playful').length, 1)
 eq('the picker marks flat as the active style', styleOption('简洁扁平').props['aria-pressed'], 'true')
 ok('the editorial style is directly selectable', styleOption('杂志编辑') !== undefined)
 styleOption('杂志编辑').props.onClick({})
@@ -1031,6 +1260,15 @@ ok('a re-query keeps the saved editorial appearance',
 ui.byClass('td-icon').find((node) => node.props['aria-label'] === '重新载入').props.onClick({})
 await settleAll(3)
 eq('reloading state preserves the selected appearance', panelRoot().props['data-todo-appearance'], 'editorial')
+styleButton().props.onClick({})
+await settleAll(2)
+ok('the playful quest style is directly selectable', styleOption('活力闯关') !== undefined)
+styleOption('活力闯关').props.onClick({})
+await settleAll(4)
+eq('selecting playful saves it through the real settings API', (await api('settings')).values.appearance, 'playful')
+eq('the active panel switches to the playful theme immediately', panelRoot().props['data-todo-appearance'], 'playful')
+ok('the playful choice survives a fresh state read',
+  (await api('state')).settings.appearance === 'playful')
 styleButton().props.onClick({})
 await settleAll(2)
 styleOption('简洁扁平').props.onClick({})
@@ -1248,18 +1486,22 @@ subDeleteOf(1).props.onClick({ stopPropagation() {} })
 await ui.settle()
 ok('deleting a subtask asks in-page', overlay.byClass('td-modal').length === 2,
   overlay.byClass('td-modal').length)
-ok('the question names the task', overlay.text().includes('无法撤销'))
+ok('the question explains that the task is recoverable from the recycle bin',
+  overlay.text().includes('移入回收站') && overlay.text().includes('可随时恢复'))
 overlay.byClass('td-btn').find((n) => overlay.text(n) === '取消').props.onClick({})
 await ui.settle()
 ok('cancelling the question keeps the subtask',
   overlay.byClass('td-sub-row').length === subsBefore, overlay.byClass('td-sub-row').length)
 subDeleteOf(1).props.onClick({ stopPropagation() {} })
 await ui.settle()
-ok('the question offers a destructive confirm', overlay.byClass('td-btn').some((n) => overlay.text(n) === '删除'))
-overlay.byClass('danger-solid').find((n) => typeof n.props.onClick === 'function').props.onClick({})
+ok('the question confirms the reversible move',
+  overlay.byClass('td-btn').some((n) => overlay.text(n) === '移入回收站'))
+overlay.byClass('td-btn').find((n) => overlay.text(n) === '移入回收站').props.onClick({})
 await ui.settle()
-ok('confirming removes it from the host',
+ok('confirming moves the subtask out of the active editor',
   overlay.byClass('td-sub-row').length === subsBefore - 1, overlay.byClass('td-sub-row').length)
+ok('the subtask remains recoverable in the trash',
+  (await api('state', { filter: 'trash' })).tasks.some((task) => task.title === '邀请评审人'))
 
 // Put the row back: the assertions below are about the dialog, not about this
 // detour, and a missing subtask would silently change their counts.
@@ -1388,8 +1630,8 @@ ok('the clipboard-copy action is enabled in the main task panel',
 const menuButtons = extensionMenu?.children.filter((node) => node.tag === 'button') ?? []
 const menuButtonLabels = menuButtons.map((node) => ui.text(node))
 const firstActionIndex = menuButtons.findIndex((node) => node.props.className === 'td-task-action')
-const deleteActionIndex = menuButtonLabels.indexOf('删除任务')
-ok('extension actions follow list destinations and precede delete',
+const deleteActionIndex = menuButtonLabels.indexOf('移入回收站')
+ok('extension actions follow list destinations and precede moving to trash',
   firstActionIndex > -1 && deleteActionIndex > menuButtonLabels.indexOf('外部动作：没有日期的想法')
   && menuButtonLabels.indexOf('收集箱') < firstActionIndex)
 const unavailableButton = extensionButtons[1]
@@ -1705,6 +1947,23 @@ section('gantt view')
 ui.clickable(ui.find('甘特')).props.onClick({})
 await ui.settle()
 ok('the gantt draws a day header row', ui.byClass('td-gantt-cell').length >= 30, ui.byClass('td-gantt-cell').length)
+const ganttLeftPane = ui.byClass('td-gantt-l')[0]
+const ganttRightPane = ui.byClass('td-gantt-r')[0]
+const ganttCss = document._head.children[0].textContent
+ok('Gantt records scroll inside synchronized task and timeline panes while headers stay pinned',
+  /\.td-gantt-l\{[^}]*overflow-y:auto[^}]*\}/.test(ganttCss)
+  && /\.td-gantt-r\{[^}]*overflow-y:auto[^}]*\}/.test(ganttCss)
+  && /\.td-gantt-th\{[^}]*position:sticky[^}]*top:0/.test(ganttCss)
+  && /\.td-gantt-hd\{[^}]*position:sticky[^}]*top:0/.test(ganttCss)
+  && typeof ganttLeftPane?.props.onScroll === 'function'
+  && typeof ganttRightPane?.props.onScroll === 'function',
+  { left: ganttLeftPane?.props.className, right: ganttRightPane?.props.className })
+ganttLeftPane.scrollTop = 96
+ganttLeftPane.props.onScroll({ currentTarget: ganttLeftPane })
+ok('scrolling task names moves the matching timeline rows', ganttRightPane.scrollTop, 96)
+ganttRightPane.scrollTop = 144
+ganttRightPane.props.onScroll({ currentTarget: ganttRightPane })
+ok('scrolling timeline rows moves the matching task names', ganttLeftPane.scrollTop, 144)
 ok('the gantt draws task rows on the left', ui.byClass('td-gantt-row').length >= 3)
 ok('the gantt draws bars', ui.byClass('td-gantt-bar').length >= 2, ui.byClass('td-gantt-bar').length)
 ok('the gantt shows the window range', /\d{4}-\d{2}-\d{2} → \d{4}-\d{2}-\d{2}/.test(ui.text()), ui.text().slice(0, 120))
@@ -2420,11 +2679,11 @@ const firstGroup = groupKeys[0]
 
 // C8: the completed group offers no "+". A task created there would be "create
 // it already done", which is not a thing anyone means.
-ui.clickable(ui.find('已完成')).props.onClick({})
+ui.byClass('td-smart-filter').find((node) => node.props['data-smart-filter'] === 'done').props.onClick({})
 await ui.settle(2)
 ok('the completed group is on screen', ui.byClass('td-grp').length >= 1, ui.byClass('td-grp').length)
 eq('the completed group offers no +', ui.byClass('td-grp-add').length, 0)
-ui.clickable(ui.find('全部任务')).props.onClick({})
+ui.byClass('td-smart-filter').find((node) => node.props['data-smart-filter'] === 'all').props.onClick({})
 await ui.settle(2)
 
 const groupAdds = ui.byClass('td-grp-add')
@@ -2485,7 +2744,7 @@ ui.clickable(ui.find('列表')).props.onClick({})
 await ui.settle(2)
 // The data block's heading is its own toggle, so its text carries the caret.
 const railTitles = ui.byClass('td-rail-t').map((n) => ui.text(n).replace(/[▸▾]/g, ''))
-const expectedRail = ['智能清单', '清单', ...(railTitles.includes('标签') ? ['标签'] : []), '视图', '数据']
+const expectedRail = ['智能清单', '整理', '清单', ...(railTitles.includes('标签') ? ['标签'] : []), '视图', '数据']
 eq('the rail reads smart lists, lists, tags, views, data',
   JSON.stringify(railTitles.slice(0, expectedRail.length)), JSON.stringify(expectedRail))
 ok('the data block is last', railTitles[railTitles.length - 1] === '数据', railTitles)
@@ -3017,6 +3276,21 @@ section('visual system v2 (computed, not rendered)')
       /\.td-seat\[data-todo-appearance="flat"\]\{[^}]*--td-accent:#145df0/.test(rules))
     ok('the editorial theme uses its restrained steel blue',
       /\.td-seat\[data-todo-appearance="editorial"\]\{[^}]*--td-accent:#496f89/.test(rules))
+    const playfulTokens = bodyOf('.td-seat[data-todo-appearance="playful"]') ?? ''
+    const playfulRows = bodyOf('.td-seat[data-todo-appearance="playful"] .td-item') ?? ''
+    const playfulButtons = bodyOf('.td-seat[data-todo-appearance="playful"] .td-btn') ?? ''
+    ok('the playful theme uses the owl-green primary and snow-white canvas',
+      /--td-accent:#58cc02/.test(playfulTokens) && /--td-canvas:#fff/.test(playfulTokens))
+    ok('playful task rows have thick borders, rounded cards, and tactile shadows',
+      /border-bottom-width:4px/.test(playfulRows) && /border-radius:14px/.test(playfulRows)
+      && /0 4px 0 var\(--td-playful-depth\)/.test(playfulRows))
+    ok('playful buttons use bold type and a pressable 4px lower edge',
+      /border-bottom-width:4px/.test(playfulButtons) && /font-weight:800/.test(playfulButtons))
+    ok('the playful palette adapts its surfaces to DSH dark mode',
+      /body\[data-ds-dark-theme\] \.td-seat\[data-todo-appearance="playful"\]\{[^}]*--td-playful-white:var\(--dsw-alias-bg-layer-1\)/.test(rules))
+    ok('the style picker lays out three choices and previews the playful sample',
+      /\.td-style-options\{[^}]*grid-template-columns:repeat\(3,/.test(rules)
+      && /\.td-style-mini\.td-style-mini-playful\{[^}]*--mini-accent:#58cc02/.test(rules))
     ok('the floating frame uses the shared hairline, radius and shadow',
       /\.td-float\{[^}]*border:1px solid var\(--td-line-2\)[^}]*border-radius:var\(--td-r-lg\)[^}]*box-shadow:var\(--td-sh-2\)/.test(rules))
     ok('the floating frame does not pin a third token palette',
@@ -3096,8 +3370,8 @@ const inputFor = (label) => ui.byClass('td-set-input').find((n) => n.props['aria
 const boxFor = (label) => ui.byClass('td-set-check').find((n) => n.props['aria-label'] === label)
 ok('the plugin settings page exposes the appearance preference', inputFor('界面风格')?.tag === 'select')
 eq('the settings form starts with the saved flat theme', inputFor('界面风格')?.props.value, 'flat')
-eq('both theme names are human-readable in the form',
-  inputFor('界面风格')?.children.map((option) => ui.text(option)), ['简洁扁平', '杂志编辑'])
+eq('all three theme names are human-readable in the form',
+  inputFor('界面风格')?.children.map((option) => ui.text(option)), ['简洁扁平', '杂志编辑', '活力闯关'])
 ok('the App ID input exists', inputFor('App ID') !== undefined)
 ok('the app_token input exists', inputFor('多维表格 app_token') !== undefined)
 eq('the secret renders as a password field', inputFor('App Secret').props.type, 'password')
@@ -3108,7 +3382,7 @@ ok('the sync buttons exist unclicked',
 // The Feishu action row, in the order the work is actually done. These are the
 // buttons a user clicks BEFORE anything is configured, so their absence -- or a
 // crash on click -- is the entire first-run experience.
-for (const label of ['测试连接', '补全字段', '预览同步', '完整对账', '从飞书补洞（预览）', '从飞书补洞']) {
+for (const label of ['测试连接', '补全字段', '预览同步', '立即同步', '完整对账', '从飞书更新本地（预览）', '从飞书补洞（预览）', '从飞书补洞']) {
   ok(`the settings page offers ${label}`,
     ui.byClass('td-set-btn').some((n) => ui.text(n) === label),
     ui.byClass('td-set-btn').map((n) => ui.text(n)))
@@ -3143,10 +3417,34 @@ await ui.settle(2)
 eq('the settings form previews the chosen appearance', ui.byClass('td-set')[0].props['data-todo-appearance'], 'editorial')
 await press('保存')
 eq('saving the settings form persists the editorial appearance', (await api('settings')).values.appearance, 'editorial')
+inputFor('界面风格').props.onChange({ target: { value: 'playful' } })
+await ui.settle(2)
+eq('the settings form previews the playful appearance', ui.byClass('td-set')[0].props['data-todo-appearance'], 'playful')
+await press('保存')
+eq('saving the settings form persists the playful appearance', (await api('settings')).values.appearance, 'playful')
 inputFor('界面风格').props.onChange({ target: { value: 'flat' } })
 await ui.settle(2)
 await press('保存')
 eq('the settings form can restore the flat appearance', (await api('settings')).values.appearance, 'flat')
+const trashDaysInput = inputFor('回收站自动清理（天）')
+const archiveDaysInput = inputFor('完成后自动归档（天）')
+ok('the settings page exposes numeric trash-retention input', trashDaysInput?.props.type === 'number')
+ok('the settings page exposes numeric archive-retention input', archiveDaysInput?.props.type === 'number')
+eq('both automatic lifecycle settings visibly default to zero/off',
+  [trashDaysInput?.props.value, archiveDaysInput?.props.value], ['0', '0'])
+eq('both retention inputs allow zero and cap at ten years',
+  [trashDaysInput?.props.min, trashDaysInput?.props.max, archiveDaysInput?.props.min, archiveDaysInput?.props.max],
+  [0, 3650, 0, 3650])
+await typeInto('回收站自动清理（天）', '30')
+await typeInto('完成后自动归档（天）', '14')
+await press('保存')
+eq('the lifecycle retention values save through the settings UI',
+  [(await api('settings')).values.trashRetentionDays, (await api('settings')).values.archiveAfterDays], [30, 14])
+await typeInto('回收站自动清理（天）', '0')
+await typeInto('完成后自动归档（天）', '0')
+await press('保存')
+eq('the UI can turn both automatic lifecycle features back off',
+  [(await api('settings')).values.trashRetentionDays, (await api('settings')).values.archiveAfterDays], [0, 0])
 
 await typeInto('App ID', 'cli_from_ui')
 await typeInto('App Secret', 'secret_from_ui')
@@ -3174,6 +3472,190 @@ const secondForm = await api('settings')
 eq('the second save applied', secondForm.values.feishu.appId, 'cli_second_edit')
 eq('and kept the secret', secondForm.secretSet, true)
 eq('and kept the switch', secondForm.values.feishu.enabled, true)
+
+// Exercise the real settings-page decision flow with only the Feishu network
+// responses mocked; the settings and state calls still use the real host HTTP API.
+uiFeishuMock.enabled = true
+uiFeishuMock.syncPreview = {
+  blocked: true, stale: false, dryRun: true, local: 1, remote: 1, unchanged: 0,
+  planned: { created: 0, updated: 0, deleted: 0 }, created: 0, updated: 0, deleted: 0,
+  unmanaged: 0, prune: false, skippedConflicts: 0, conflictPolicy: 'stop',
+  previewToken: 'sync-preview-token',
+  conflicts: [{ key: 't_ui', title: '界面测试', fields: ['标题'], changes: [
+    { field: '标题', local: '本地标题', remote: '飞书标题', reason: 'both' },
+  ] }],
+}
+await press('立即同步')
+ok('a conflict report is shown before any sync write',
+  ui.text().includes('本地标题') && ui.text().includes('飞书标题'), ui.text().slice(-500))
+eq('the immediate-sync preflight made no write call', uiFeishuMock.syncCalls.map((args) => args.dryRun), [true])
+ok('the conflict decision offers explicit remote-import and local-push choices',
+  ui.byClass('td-set-btn').some((node) => ui.text(node) === '按飞书更新本地（先预览）')
+  && ui.byClass('td-set-btn').some((node) => ui.text(node) === '按本地覆盖飞书'))
+uiFeishuMock.applyPreview = {
+  keyField: '任务ID', remote: 1, matched: 1, differing: 1, planned: 1,
+  updated: 0, updatedFields: 0, items: [{ key: 't_ui', title: '界面测试', changes: [
+    { field: '标题', local: '本地标题', remote: '飞书标题', applied: true, reason: '' },
+  ] }], skipped: [], notApplied: [], missingColumns: [], createdLists: [],
+  dryRun: true, previewToken: 'remote-preview-token',
+}
+uiFeishuMock.applyActual = {
+  keyField: '任务ID', remote: 1, matched: 1, differing: 1, planned: 1,
+  updated: 1, updatedFields: 1, items: [{ key: 't_ui', title: '界面测试', changes: [
+    { field: '标题', local: '本地标题', remote: '飞书标题', applied: true, reason: '' },
+  ] }], skipped: [], notApplied: [], missingColumns: [], createdLists: [],
+  dryRun: false, previewToken: 'remote-preview-token',
+}
+await press('按飞书更新本地（先预览）')
+ok('the reverse-import preview asks for an explicit confirmation',
+  ui.byClass('td-set-btn').some((node) => ui.text(node) === '确认应用以上预览'))
+ok('the preview report shows both sides',
+  ui.text().includes('本地标题') && ui.text().includes('飞书标题'), ui.text().slice(-500))
+ok('the preview gives persistent feedback near the settings header, not only below the fold',
+  ui.byClass('td-set-banner').some((node) => ui.text(node).includes('飞书预览已完成') && ui.text(node).includes('可更新 1 项')),
+  ui.text().slice(0, 360))
+await press('确认应用以上预览')
+eq('the preview and confirmation requests are separate, and confirmation carries the token',
+  uiFeishuMock.applyCalls, [{ dryRun: true }, { previewToken: 'remote-preview-token' }])
+eq('the confirmation request includes the preview token', uiFeishuMock.applyCalls.at(-1)?.previewToken, 'remote-preview-token')
+eq('confirmed import ends with a completion report', ui.text().includes('已更新 1 项'), true)
+ok('the confirmation leaves a persistent completion message near the settings header',
+  ui.byClass('td-set-banner').some((node) => ui.text(node).includes('已更新 1 项')),
+  ui.text().slice(0, 360))
+
+uiFeishuMock.syncActual = {
+  blocked: false, stale: false, dryRun: false, local: 1, remote: 1, unchanged: 0,
+  planned: { created: 0, updated: 1, deleted: 0 }, created: 0, updated: 1, deleted: 0,
+  unmanaged: 0, prune: false, skippedConflicts: 0, conflictPolicy: 'push', conflicts: [],
+}
+await press('立即同步')
+await press('按本地覆盖飞书')
+ok('the explicit local-push choice confirms the preview token and policy',
+  uiFeishuMock.syncCalls.at(-1)?.conflictPolicy === 'push'
+  && uiFeishuMock.syncCalls.at(-1)?.expectedToken === 'sync-preview-token', uiFeishuMock.syncCalls)
+
+uiFeishuMock.syncActual = {
+  blocked: false, stale: false, dryRun: false, local: 1, remote: 1, unchanged: 0,
+  planned: { created: 0, updated: 0, deleted: 0 }, created: 0, updated: 0, deleted: 0,
+  unmanaged: 0, prune: false, skippedConflicts: 1, conflictPolicy: 'skip',
+  conflicts: [{ key: 't_ui', title: '界面测试', changes: [
+    { field: '标题', local: '本地标题', remote: '飞书标题', reason: 'both' },
+  ] }],
+}
+await press('立即同步')
+await press('跳过冲突并同步安全项')
+ok('the explicit skip choice confirms the snapshot and skip policy',
+  uiFeishuMock.syncCalls.at(-1)?.conflictPolicy === 'skip'
+  && uiFeishuMock.syncCalls.at(-1)?.expectedToken === 'sync-preview-token', uiFeishuMock.syncCalls)
+ok('the skip result visibly reports the skipped conflict values',
+  ui.text().includes('本地标题') && ui.text().includes('飞书标题'), ui.text().slice(-500))
+uiFeishuMock.enabled = false
+
+// Exercise the full archive -> restore -> recycle-bin -> restore/purge path in
+// the rendered client. The final setting save enabled Feishu with fake browser
+// credentials, so turn it off before remounting the task panel (which performs
+// its ordinary entry check on first open).
+await api('updateSettings', { feishu: { enabled: false } })
+const lifecycleTask = (await api('create', { title: 'UI 生命周期任务', due: today })).created
+await api('toggle', { id: lifecycleTask.id, done: true })
+ui.render(React.createElement(Panel, {}))
+overlay.render(React.createElement(Overlay, {}))
+await settleAll(5)
+const withinNode = (node, ancestor) => {
+  let cursor = node
+  while (cursor !== null && cursor !== undefined) {
+    if (cursor === ancestor) return true
+    cursor = cursor.parent
+  }
+  return false
+}
+const lifecycleRow = () => ui.byClass('td-item').find((node) => node.props['data-row-id'] === lifecycleTask.id)
+const lifecycleMore = () => {
+  const row = lifecycleRow()
+  return row === undefined ? undefined : ui.tag('button').find((node) =>
+    node.props.title === '更多任务操作' && withinNode(node, row))
+}
+const openLifecycleMenu = async () => {
+  const button = lifecycleMore()
+  button?.props.onClick({ stopPropagation() {}, currentTarget: { getBoundingClientRect: () => ({ top: 10, left: 10, bottom: 30 }) } })
+  await settleAll(2)
+}
+const clickPanelMenu = async (label) => {
+  const pop = ui.byClass('td-pop')[0]
+  const button = pop === undefined ? undefined : ui.tag('button').find((node) =>
+    ui.text(node) === label && withinNode(node, pop))
+  button?.props.onClick({})
+  await settleAll(4)
+  return button
+}
+const selectCollection = async (key) => {
+  ui.byClass('td-collection-filter').find((node) => node.props['data-collection-filter'] === key)?.props.onClick({})
+  await settleAll(4)
+}
+const selectSmartFilter = async (key) => {
+  ui.byClass('td-side').find((node) => node.props['data-smart-filter'] === key)?.props.onClick({})
+  await settleAll(4)
+}
+const clickConfirm = async (title, label) => {
+  const modal = overlay.byClass('td-modal').find((node) => node.props['aria-label'] === title)
+  const button = modal === undefined ? undefined : overlay.tag('button').find((node) =>
+    overlay.text(node) === label && withinNode(node, modal))
+  button?.props.onClick({})
+  await settleAll(5)
+  return button
+}
+await selectSmartFilter('done')
+ok('the completed test task appears in the completed-task list', lifecycleRow() !== undefined)
+await openLifecycleMenu()
+ok('a completed task offers a direct archive action', ui.byClass('td-pop').length === 1
+  && ui.text(ui.byClass('td-pop')[0]).includes('归档任务'))
+await clickPanelMenu('归档任务')
+ok('the archive action removes the task from active rows', lifecycleRow() === undefined)
+await selectCollection('archive')
+ok('the archived task appears in the archive collection', lifecycleRow() !== undefined)
+ok('archived tasks disable completion controls',
+  ui.byClass('td-chk').some((node) => node.props.disabled === true))
+await openLifecycleMenu()
+await clickPanelMenu('恢复到待办')
+await selectSmartFilter('done')
+ok('archive restoration returns the completed task to the active done filter', lifecycleRow() !== undefined)
+await openLifecycleMenu()
+await clickPanelMenu('移入回收站')
+ok('moving to trash asks for confirmation',
+  overlay.byClass('td-modal').some((node) => node.props['aria-label'] === '移入回收站'))
+await clickConfirm('移入回收站', '移入回收站')
+ok('confirming the action removes the task from active rows', lifecycleRow() === undefined)
+await selectCollection('trash')
+ok('the deleted task appears in the recycle bin', lifecycleRow() !== undefined)
+ok('recycle-bin tasks disable completion controls',
+  ui.byClass('td-chk').some((node) => node.props.disabled === true))
+await openLifecycleMenu()
+await clickPanelMenu('恢复任务')
+await selectSmartFilter('done')
+ok('trash restoration returns the task to the active done filter', lifecycleRow() !== undefined)
+await openLifecycleMenu()
+await clickPanelMenu('移入回收站')
+await clickConfirm('移入回收站', '移入回收站')
+await selectCollection('trash')
+await openLifecycleMenu()
+await clickPanelMenu('永久删除')
+ok('permanent removal from trash asks for an irreversible confirmation',
+  overlay.byClass('td-modal').some((node) => node.props['aria-label'] === '永久清除任务'))
+await clickConfirm('永久清除任务', '永久清除')
+ok('permanent purge removes the task from the recycle-bin view', lifecycleRow() === undefined)
+
+const emptyBinTask = (await api('create', { title: '清空回收站测试项', due: today })).created
+await api('remove', { id: emptyBinTask.id })
+await selectCollection('trash')
+ok('the rail offers empty-bin control only while the bin has entries',
+  ui.tag('button').some((node) => ui.text(node) === '清空回收站'))
+ui.tag('button').find((node) => ui.text(node) === '清空回收站')?.props.onClick({})
+await settleAll(2)
+ok('empty-bin is also confirmed before permanent deletion',
+  overlay.byClass('td-modal').some((node) => node.props['aria-label'] === '清空回收站'))
+await clickConfirm('清空回收站', '清空回收站')
+ok('empty-bin permanently clears all remaining recycle entries',
+  (await api('state', { filter: 'trash' })).tasks.length === 0)
 
 // ===========================================================================
 // summary

@@ -242,17 +242,102 @@ const withKids = store.create({ title: '要被删的' })
 const kidA = store.addSubtask(withKids.id, { title: '子1' })
 const kidB = store.addSubtask(kidA.id, { title: '孙1' })
 const removed = store.remove(withKids.id)
-eq('the whole subtree goes', removed.deleted, 3)
-ok('and is really gone', store.get(kidB.id) === null)
+eq('the whole subtree moves to the recycle bin', removed.deleted, 3)
+ok('deleted tasks leave active views but remain recoverable',
+  store.get(kidB.id) === null && store.getTrashed(kidB.id)?.title === '孙1')
+eq('the tree relationships are preserved in the recycle bin', store.getTrashed(kidB.id)?.parentId, kidA.id)
+const restoredTree = store.restore(withKids.id, { source: 'trash' })
+eq('restoring a task restores its trashed descendants', restoredTree.restored, 3)
+ok('restoration clears trash markers and deletion tombstones',
+  store.get(kidB.id)?.trashedAt === null && !store.tombstones().includes(withKids.id))
+store.remove(withKids.id)
 const linkedSourceForDelete = store.create({ title: '删除跟进记录测试', due: T })
 const linkedSourceDone = store.toggle(linkedSourceForDelete.id, {
   followUp: { title: '将被删除的跟进任务', due: '2026-10-17' },
 })
 const linkedTaskId = linkedSourceDone.completionRecords.at(-1).followUpTaskId
 store.remove(linkedTaskId)
-ok('deleting a follow-up clears the source record link',
+ok('moving a follow-up to trash preserves its reversible relation',
+  store.getTrashed(linkedTaskId)?.followUpOf === linkedSourceForDelete.id
+  && store.get(linkedSourceForDelete.id).completionRecords.at(-1).followUpTaskId === linkedTaskId)
+store.purgeTrash(linkedTaskId)
+ok('permanently purging a follow-up clears the source record link',
   store.get(linkedSourceForDelete.id).completionRecords.at(-1).followUpTaskId === null)
 store.remove(linkedSourceForDelete.id)
+
+console.log('--- archive and restore ---')
+const archiveCandidate = store.create({ title: '归档任务', due: T })
+ok('an open task cannot be archived', (() => {
+  try { store.archive(archiveCandidate.id); return false } catch { return store.get(archiveCandidate.id)?.archivedAt === null }
+})())
+store.toggle(archiveCandidate.id, { today: T })
+const archivedTask = store.archive(archiveCandidate.id, { at: '2026-09-17T10:00:00' })
+eq('archiving leaves the completed task outside active reads',
+  [archivedTask.archivedAt, store.get(archiveCandidate.id)], ['2026-09-17T10:00:00', null])
+eq('archive filtering still supports keyword search',
+  filterTasks(store, { filter: 'archive', query: '归档', today: T }).map((task) => task.id), [archiveCandidate.id])
+ok('archived tasks remain in the sync/history collection',
+  store.all({ includeArchived: true }).some((task) => task.id === archiveCandidate.id))
+const unarchived = store.restore(archiveCandidate.id, { source: 'archive' })
+eq('restoring an archived task returns it to active tasks',
+  [unarchived.source, store.get(archiveCandidate.id)?.archivedAt, store.get(archiveCandidate.id)?.done],
+  ['archive', null, true])
+
+console.log('--- automatic lifecycle retention ---')
+const lifecycle = new TodoStore({ dataFile: path.join(dir, 'lifecycle.json') }).load()
+const oldDone = lifecycle.create({
+  id: 't_old_done', title: '旧完成', done: true,
+  completedAt: '2026-08-01T00:00:00', createdAt: '2026-07-01T00:00:00',
+})
+const recentDone = lifecycle.create({
+  id: 't_recent_done', title: '新完成', done: true,
+  completedAt: '2026-09-16T00:00:00', createdAt: '2026-09-01T00:00:00',
+})
+const openForRetention = lifecycle.create({ id: 't_open', title: '未完成', done: false })
+const archivedByAge = lifecycle.archiveCompleted({
+  olderThanDays: 7, now: new Date('2026-09-17T00:00:00Z'), at: '2026-09-17T00:00:00',
+})
+eq('auto-archive only moves tasks whose completion timestamp passed the retention age',
+  [archivedByAge.archived, lifecycle.getArchived(oldDone.id)?.title,
+    lifecycle.get(recentDone.id)?.title, lifecycle.get(openForRetention.id)?.title],
+  [1, '旧完成', '新完成', '未完成'])
+const oldTrash = lifecycle.create({ id: 't_old_trash', title: '过期回收站项' })
+lifecycle.moveToTrash(oldTrash.id, { at: '2026-08-01T00:00:00Z' })
+const newTrash = lifecycle.create({ id: 't_new_trash', title: '未过期回收站项' })
+lifecycle.moveToTrash(newTrash.id, { at: '2026-09-16T00:00:00Z' })
+eq('zero days disables automatic purge', lifecycle.purgeExpiredTrash(0, {
+  now: new Date('2026-09-17T00:00:00Z'),
+}).purged, 0)
+const purgedByAge = lifecycle.purgeExpiredTrash(30, { now: new Date('2026-09-17T00:00:00Z') })
+eq('auto-purge permanently clears only expired trash',
+  [purgedByAge.purged, lifecycle.getAny(oldTrash.id), lifecycle.getTrashed(newTrash.id)?.title],
+  [1, null, '未过期回收站项'])
+ok('purging keeps the Feishu deletion tombstone', lifecycle.tombstones().includes(oldTrash.id))
+const manuallyPurged = lifecycle.purgeTrash(newTrash.id)
+eq('manual permanent purge works separately from retention',
+  [manuallyPurged.purged, lifecycle.getAny(newTrash.id)], [1, null])
+
+console.log('--- legacy document migration ---')
+const legacyFile = path.join(dir, 'legacy-v1.json')
+fs.writeFileSync(legacyFile, JSON.stringify({
+  meta: { version: 1, createdAt: '2025-01-01T00:00:00', updatedAt: '2025-01-01T00:00:00' },
+  lists: [{ id: 'l_inbox', name: '收集箱', color: '#4f8cff', order: 0, system: true }],
+  tasks: [{
+    id: 't_legacy', title: '旧版任务', note: '', done: true, completedAt: '2025-01-02T00:00:00',
+    priority: 0, listId: 'l_inbox', parentId: null, followUpOf: null, completionRecords: [], order: 0,
+    tags: [], due: '2025-01-02', start: null, recurrence: null, seriesAnchor: null, completedCount: 0,
+    seriesFinished: false, skipped: [], history: [], createdAt: '2025-01-01T00:00:00', updatedAt: '2025-01-02T00:00:00',
+  }],
+  removed: [], feishuBaselines: {},
+}), 'utf8')
+const migrated = new TodoStore({ dataFile: legacyFile }).load()
+const migratedDoc = JSON.parse(fs.readFileSync(legacyFile, 'utf8'))
+eq('v1 data migrates to the current schema without losing the completed task',
+  [migratedDoc.meta.version, migratedDoc.tasks[0].id, migratedDoc.tasks[0].archivedAt,
+    migratedDoc.tasks[0].trashedAt, migratedDoc.trash],
+  [2, 't_legacy', null, null, []])
+ok('legacy completed tasks stay active unless auto-archive is explicitly enabled',
+  migrated.get('t_legacy')?.done === true)
 
 console.log('--- quick add through the store ---')
 const quick = store.quickAdd('明天 15:00 交周报 !高 #新清单 @紧要', { today: T })
@@ -459,9 +544,14 @@ const toClear = store.tasks.find((t) => t.title === '待清理')
 store.addSubtask(toClear.id, { title: '子任务也走' })
 store.toggle(toClear.id, { today: T })
 const cleared = store.clearCompleted()
-ok('clearCompleted removes every done group and its subtasks', cleared.deleted === 8, cleared.deleted)
+ok('clearCompleted moves every done group and its subtasks into trash',
+  cleared.deleted === 9 && cleared.ids.every((id) => store.getTrashed(id) !== null), cleared.deleted)
 ok('and leaves open tasks alone', store.tasks.some((t) => t.title === '每日站会' && !t.done))
-ok('a surviving follow-up is detached when its completed source is cleared',
+ok('a surviving follow-up stays linked while its completed source is recoverable',
+  store.get(approvalFollowUp.id)?.followUpOf === copyrightApplication.id
+  && store.getTrashed(copyrightApplication.id)?.completionRecords.at(-1).followUpTaskId === approvalFollowUp.id)
+store.purgeTrash(copyrightApplication.id)
+ok('permanently purging the source detaches its surviving follow-up',
   store.get(approvalFollowUp.id)?.followUpOf === null)
 
 console.log('--- create() dates: the two ends default as a PAIR, not one at a time ---')

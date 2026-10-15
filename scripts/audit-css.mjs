@@ -137,13 +137,14 @@ const unused = [...defined].filter((name) => !used.has(name)).sort()
 if (unused.length > 0) console.log(`  note: rules with no className usage: ${unused.join(', ')}`)
 
 // ---------------------------------------------------------------------------
-section('one token map, no second palette')
+section('one host-token map, scoped appearance palettes')
 // ---------------------------------------------------------------------------
 
-// The sheet aliases the host tokens once, in one block, and every rule below
-// speaks `--td-*`. So the question is not how many `var(--dsw-*)` calls appear --
-// that number goes DOWN when the indirection is added -- but whether there is
-// exactly one mapping and whether anything bypasses it.
+// The sheet aliases the host tokens once, in one block, and ordinary component
+// rules speak `--td-*`. The few colors a saved appearance owns live on its marked
+// root, keeping those choices local rather than creating a second global palette.
+// The audit checks both that the host map is unique and that component rules do
+// not bypass the shared or appearance-scoped tokens.
 //
 // The block is found by what it DECLARES, not by a copy of its selector text: the
 // selector list has to grow every time the shell gains a surface (it did in t12),
@@ -163,6 +164,13 @@ const topRules = []
   }
 }
 ok('the sheet parses into top-level rules', topRules.length > 100, topRules.length)
+const APPEARANCE_ROOT = /^(?:body\[data-ds-dark-theme\]\s+)?\.td-seat\[data-todo-appearance="(flat|editorial|playful)"\]$/
+const appearanceRootRules = topRules.filter(({ head }) => APPEARANCE_ROOT.test(head))
+const playfulThemeMaps = appearanceRootRules.filter(({ head }) => head.includes('data-todo-appearance="playful"'))
+ok('the playful palette has separately scoped light and dark token maps',
+  playfulThemeMaps.some(({ head }) => !head.startsWith('body[data-ds-dark-theme]'))
+  && playfulThemeMaps.some(({ head }) => head.startsWith('body[data-ds-dark-theme]')),
+  playfulThemeMaps.map(({ head }) => head))
 
 /** The classes a selector list applies to, `:not(...)` excluded (a guarded element
  *  is exactly the one that must NOT be counted as covered). */
@@ -183,10 +191,10 @@ const mapped = declarations.filter((d) => /--td-[\w-]+\s*:/.test(d) && d.include
 ok('the token map is declared once, on the seat marker', aliased.has('td-seat') && aliased.size === 1, [...aliased])
 ok('the aliases resolve to host tokens', mapped >= 10, mapped)
 // Literal colours are the listed exceptions: semantic priority/status hues, the
-// small smart-filter palette, the editorial appearance's cream/ink pair, and the
-// fixed gallery blue with its white on-colour. Those hues cannot be derived from
-// the host's greyscale theme, so each is declared once in the alias block; every
-// other colour must come through the host token map.
+// small smart-filter palette, the editorial cream/ink pair, and the fixed gallery
+// blue with its white on-colour. Those hues cannot be derived from the host's
+// grayscale theme. Playful values are declared only in the marked appearance root;
+// all component rules still have to read a token instead of pinning a color.
 // White is not the foreground for the host's theme-dependent brand fill (which
 // flips to white in dark mode); it is only the label on the fixed gallery-blue
 // accent, declared once as --td-accent-on. That keeps the two contrast roles
@@ -210,7 +218,10 @@ const LITERAL_COLOURS = new Set([
   '#fffaf1', '#f6eedd', '#3b82f6', '#145df0', '#496f89', '#b85e53', '#568b83',
   '#fff', '#16233a', '#4d6076',
 ])
-const literals = [...new Set((cssRules.match(/#[0-9a-fA-F]{3,8}\b/g) ?? []).map((c) => c.toLowerCase()))]
+const appearancePaletteBlocks = /(?:body\[data-ds-dark-theme\]\s+)?\.td-seat\[data-todo-appearance="playful"\]\s*\{[^{}]*\}/g
+const playfulPreviewPaletteBlocks = /(?:body\[data-ds-dark-theme\]\s+)?\.td-style-mini\.td-style-mini-playful\s*\{[^{}]*\}/g
+const literalCheckSheet = cssRules.replace(appearancePaletteBlocks, ' ').replace(playfulPreviewPaletteBlocks, ' ')
+const literals = [...new Set((literalCheckSheet.match(/#[0-9a-fA-F]{3,8}\b/g) ?? []).map((c) => c.toLowerCase()))]
 const stray = literals.filter((c) => !LITERAL_COLOURS.has(c)).sort()
 ok('nothing in the rules bypasses the alias map', stray.length === 0, stray)
 
@@ -513,6 +524,9 @@ ok('the smart accent and editorial serif stack have local writers',
   CSS_LOCAL_TOKENS.every((name) => cssRules.includes(name)))
 ok('the editorial style declares its serif fallback stack', /--td-serif\s*:\s*ui-serif/.test(cssRules))
 const declaredNames = new Set([...aliasBlock.matchAll(/--td-[\w-]+/g)].map((m) => m[0]))
+for (const { body } of appearanceRootRules) {
+  for (const match of body.matchAll(/(--td-[\w-]+)\s*:/g)) declaredNames.add(match[1])
+}
 const consumed = new Set([...css.replace(/\/\*[\s\S]*?\*\//g, ' ').matchAll(/var\((--td-[\w-]+)/g)].map((m) => m[1]))
 const orphans = [...consumed].filter((name) => !declaredNames.has(name) && !LOCAL_TOKENS.includes(name)).sort()
 ok('every consumed token is mapped or has a local writer', orphans.length === 0, orphans)

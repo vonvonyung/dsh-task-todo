@@ -14,7 +14,7 @@ import { isJsonValue, snapshotJsonValue } from '@deepseek-ai/dsh-util-values'
 import { TodoStore } from '../lib/store.js'
 import {
   BATCH_LIMIT, COLUMN_TYPE_TEXT, FEISHU_DEFAULTS, FEISHU_FIELDS, FeishuClient, FeishuSync, asText, chunk,
-  diffSync, keyedRemoteCount, missingColumns, missingFeishuSettings, normalizeFeishuSettings,
+  diffSync, feishuSyncScope, keyedRemoteCount, missingColumns, missingFeishuSettings, normalizeFeishuSettings,
   remoteRowToTask, requiredColumns, statusLabel, taskToFields,
 } from '../lib/feishu.js'
 import { TodoService } from '../lib/index.js'
@@ -137,6 +137,9 @@ eq('a trailing slash is trimmed', normalizeFeishuSettings({ baseUrl: 'https://op
 eq('a non-boolean flag keeps its default', normalizeFeishuSettings({ enabled: 'yes' }).enabled, false)
 eq('missingFeishuSettings lists the four ids/secrets', missingFeishuSettings(defaults),
   ['feishu.appId', 'feishu.appSecret', 'feishu.appToken', 'feishu.tableId'])
+const scopeId = feishuSyncScope({ baseUrl: 'https://open.feishu.cn/', appToken: 'secret-table-token', tableId: 'table-secret', keyField: '任务ID' })
+ok('the sync baseline scope is stable but does not persist table identifiers',
+  scopeId.length === 64 && !scopeId.includes('secret-table-token') && !scopeId.includes('table-secret'), scopeId)
 
 eq('asText: string', asText('x'), 'x')
 eq('asText: number', asText(42), '42')
@@ -319,11 +322,28 @@ eq('the first run reports what it wrote', [first.created, first.updated, first.d
 eq('the summary names the key field', first.keyField, '任务ID')
 eq('the auth token is fetched once for the whole run', syncServer.state.auth, 1)
 gate('a sync summary is lossless JSON', first)
+const initialBaseline = syncStore.feishuBaseline(feishuSyncScope(config))
+ok('the first successful sync stores per-field baseline fingerprints',
+  initialBaseline[a.id]?.['标题']?.startsWith('sha256:') === true, initialBaseline[a.id])
+ok('baseline storage does not duplicate raw task content',
+  !JSON.stringify(initialBaseline).includes('交季度报告'), initialBaseline[a.id])
+const reloadedSyncStore = new TodoStore({ dataFile: path.join(dir, 'sync.json'), saveDelay: 5 }).load()
+eq('per-field fingerprints survive a store reload',
+  reloadedSyncStore.feishuBaseline(feishuSyncScope(config)), initialBaseline)
+reloadedSyncStore.dispose()
 
 const second = await sync.run({ today: T })
 eq('a second run creates nothing', second.created, 0)
 eq('a second run updates nothing', second.updated, 0)
 eq('a second run leaves every row unchanged', second.unchanged, 3)
+
+const archivedForSync = syncStore.create({ id: 't_archived_sync', title: '归档后仍同步', done: true,
+  completedAt: '2026-09-16T08:00:00' })
+syncStore.archive(archivedForSync.id, { at: '2026-09-17T08:00:00' })
+const archivedSyncResult = await sync.run({ today: T })
+eq('archived tasks remain in Feishu sync scope', [archivedSyncResult.local, archivedSyncResult.created], [4, 1])
+ok('the archived task still has a row in Feishu',
+  [...syncServer.state.records.values()].some((fields) => fields['任务ID'] === archivedForSync.id))
 
 console.log('--- status changes propagate ---')
 syncStore.toggle(a.id, { today: T })
@@ -347,7 +367,119 @@ eq('the remote completion-history column carries the timestamp and optional-empt
   remoteA[FEISHU_FIELDS.completionRecords],
   `${syncedCompletionRecord.at.replace('T', ' ')}｜（未填写完成情况）`)
 
-console.log('--- deletions are opt-in AND tombstone-gated ---')
+console.log('--- sync conflict protection uses a shared baseline, never timestamps ---')
+{
+  const conflictStore = new TodoStore({ dataFile: path.join(dir, 'conflicts.json'), saveDelay: 5 }).load()
+  const conflictTask = conflictStore.create({ id: 't_conflict', title: '共同标题', note: '共同备注' })
+  const safeTask = conflictStore.create({ id: 't_safe', title: '安全任务', note: '旧备注' })
+  const conflictServer = makeFeishuServer()
+  const conflictSync = new FeishuSync(config, conflictStore, { fetch: conflictServer.fetch, now: fixedNow })
+  const common = await conflictSync.run({ today: T })
+  eq('the initial common state is written', common.created, 2)
+  const recordFor = (key) => [...conflictServer.state.records.entries()].find(([, fields]) => fields['任务ID'] === key)
+  const [conflictRecordId, conflictFields] = recordFor(conflictTask.id)
+  conflictFields['标题'] = '飞书端标题'
+  conflictStore.update(conflictTask.id, { title: '本地端标题' })
+  conflictStore.update(safeTask.id, { note: '仅本地修改' })
+
+  const preview = await conflictSync.run({ today: T, dryRun: true })
+  eq('a remote and local edit blocks the default plan', preview.blocked, true)
+  eq('the conflicting field is named', preview.conflicts[0].changes.map((item) => item.field), ['标题'])
+  eq('the conflict contains the actual local and remote values',
+    [preview.conflicts[0].changes[0].local, preview.conflicts[0].changes[0].remote], ['本地端标题', '飞书端标题'])
+  eq('the conflict is classified as a two-sided change', preview.conflicts[0].changes[0].reason, 'both')
+  ok('a preview carries a confirmation snapshot token', typeof preview.previewToken === 'string' && preview.previewToken.length === 64)
+  const beforeBlockedWrites = conflictServer.state.calls.filter((call) => /batch_(create|update|delete)$/.test(call.pathname)).length
+  const blocked = await conflictSync.run({ today: T })
+  eq('the ordinary sync stops instead of silently overwriting', blocked.blocked, true)
+  eq('the blocked sync writes no records',
+    conflictServer.state.calls.filter((call) => /batch_(create|update|delete)$/.test(call.pathname)).length,
+    beforeBlockedWrites)
+
+  const report = await conflictSync.reconcile({ today: T })
+  const rowReport = report.differing.find((row) => row.key === conflictTask.id)
+  eq('reconciliation records the field values and direction',
+    [rowReport.changes[0].local, rowReport.changes[0].remote, rowReport.changes[0].direction],
+    ['本地端标题', '飞书端标题', 'both'])
+
+  const skipped = await conflictSync.run({ today: T, conflictPolicy: 'skip' })
+  eq('skip policy records that conflict was skipped', skipped.skippedConflicts, 1)
+  eq('skip policy still writes a safe local-only edit', skipped.updated, 1)
+  eq('skip policy leaves the remote conflict intact', recordFor(conflictTask.id)[1]['标题'], '飞书端标题')
+  eq('safe changes reach the table', recordFor(safeTask.id)[1]['备注'], '仅本地修改')
+
+  const pushed = await conflictSync.run({ today: T, conflictPolicy: 'push' })
+  eq('push policy is explicit and resolves the selected conflict', pushed.blocked, false)
+  eq('push policy writes the local value', recordFor(conflictTask.id)[1]['标题'], '本地端标题')
+  const persisted = conflictStore.feishuBaseline(feishuSyncScope(config))[conflictTask.id]
+  ok('the new common baseline remains a fingerprint, not cleartext',
+    persisted['标题'].startsWith('sha256:') && persisted['标题'] !== '本地端标题', persisted)
+
+  // A plan also depends on the local baseline and tombstone whitelist, not only
+  // the visible records. Changing that planning state must invalidate its token.
+  const conflictScope = feishuSyncScope(config)
+  const savedBaseline = conflictStore.feishuBaseline(conflictScope)
+  const statePreview = await conflictSync.run({ today: T, dryRun: true, conflictPolicy: 'push' })
+  conflictStore.setFeishuBaseline(conflictScope, {
+    ...savedBaseline,
+    [conflictTask.id]: { ...savedBaseline[conflictTask.id], 标题: 'sha256:changed-baseline' },
+  })
+  const baselineStale = await conflictSync.run({
+    today: T, expectedToken: statePreview.previewToken, conflictPolicy: 'push',
+  })
+  eq('a baseline change after preview invalidates confirmation', baselineStale.stale, true)
+  conflictStore.setFeishuBaseline(conflictScope, savedBaseline)
+
+  // A changed remote value after a preview must invalidate confirmation, even
+  // when the current policy would otherwise push it.
+  conflictStore.update(conflictTask.id, { title: '本地再次编辑' })
+  const stalePreview = await conflictSync.run({ today: T, dryRun: true })
+  recordFor(conflictTask.id)[1]['标题'] = '预览后飞书改动'
+  const writesBeforeStale = conflictServer.state.calls.filter((call) => /batch_(create|update|delete)$/.test(call.pathname)).length
+  const stale = await conflictSync.run({ today: T, expectedToken: stalePreview.previewToken, conflictPolicy: 'push' })
+  eq('a changed remote snapshot is rejected at confirmation', stale.stale, true)
+  eq('stale confirmation writes nothing',
+    conflictServer.state.calls.filter((call) => /batch_(create|update|delete)$/.test(call.pathname)).length,
+    writesBeforeStale)
+  eq('the post-preview remote edit survives untouched', recordFor(conflictTask.id)[1]['标题'], '预览后飞书改动')
+}
+
+console.log('--- field decisions are scoped to one task, one field, and one preview ---')
+const scopedStore = new TodoStore({ dataFile: path.join(dir, 'scoped-fields.json'), saveDelay: 5 }).load()
+const scopedTask = scopedStore.create({ id: 't_scoped', title: '共同标题', note: '共同备注' })
+const scopedServer = makeFeishuServer({ fields: requiredColumns('任务ID') })
+const scopedSync = new FeishuSync(config, scopedStore, { fetch: scopedServer.fetch, now: fixedNow })
+await scopedSync.run({ today: T })
+const scopedRecord = [...scopedServer.state.records.entries()].find(([, fields]) => fields['任务ID'] === scopedTask.id)
+scopedStore.update(scopedTask.id, { title: '本地标题', note: '本地备注' })
+scopedRecord[1]['标题'] = '飞书标题'
+scopedRecord[1]['备注'] = '飞书备注'
+const titleOnlyPreview = await scopedSync.run({
+  today: T, keys: [scopedTask.id], fields: ['标题'], conflictPolicy: 'skip', dryRun: true,
+})
+eq('a field-scoped preview only reports the selected field',
+  titleOnlyPreview.conflicts[0]?.changes.map((change) => change.field), ['标题'])
+eq('the preview still confirms the exact task/field scope', titleOnlyPreview.blocked, false)
+const wrongFieldToken = await scopedSync.run({
+  today: T, keys: [scopedTask.id], fields: ['备注'], conflictPolicy: 'push',
+  expectedToken: titleOnlyPreview.previewToken,
+})
+eq('a preview token cannot be reused for a different field', wrongFieldToken.stale, true)
+scopedServer.state.calls.length = 0
+const titleOnlyApplied = await scopedSync.run({
+  today: T, keys: [scopedTask.id], fields: ['标题'], conflictPolicy: 'push',
+  expectedToken: titleOnlyPreview.previewToken,
+})
+const currentScopedFields = scopedServer.state.records.get(scopedRecord[0])
+eq('an explicit field decision writes the chosen local value', currentScopedFields['标题'], '本地标题')
+eq('the same-row unselected Feishu field remains untouched', currentScopedFields['备注'], '飞书备注')
+eq('the batch payload contains only the selected field',
+  scopedServer.state.calls.find((call) => call.pathname.endsWith('/batch_update'))?.body.records[0].fields,
+  { 标题: '本地标题' })
+eq('the confirmed field decision updates one remote row', titleOnlyApplied.updated, 1)
+scopedStore.dispose()
+
+console.log('--- deletions are opt-in, tombstone-gated, and conflict-safe ---')
 syncStore.remove(b.id)
 // Default is OFF, so the same removal now deletes nothing from the table.
 const withoutOptIn = await sync.run({ today: T })
@@ -486,6 +618,447 @@ const wiredPulled = await wired.pullFeishu({})
 eq('the service pulls the hole', wiredPulled.created, 1)
 ok('and the task now exists locally', wired.require().get('t_wired') !== null)
 gate('the service pull payload is lossless JSON', wiredPulled)
+const wiredRecord = [...svcServer.state.records.entries()].find(([, fields]) => fields['任务ID'] === 't_wired')
+wiredRecord[1]['标题'] = '由服务层反向更新'
+const wiredApplyPreview = await wired.applyFeishuRemote({ dryRun: true })
+eq('the service previews a Feishu edit to an existing local task', wiredApplyPreview.planned, 1)
+eq('the service preview leaves the local title untouched', wired.require().get('t_wired').title, '从服务层补回来的任务')
+gate('the service apply-remote preview payload is lossless JSON', wiredApplyPreview)
+const wiredApplied = await wired.applyFeishuRemote({ previewToken: wiredApplyPreview.previewToken })
+eq('the service applies the matching preview token', wiredApplied.updated, 1)
+eq('the service updated the existing task title', wired.require().get('t_wired').title, '由服务层反向更新')
+gate('the service apply-remote result is lossless JSON', wiredApplied)
+
+console.log('--- entry reconciliation merges safe changes and holds both-sided conflicts ---')
+const entryServer = makeFeishuServer({ fields: requiredColumns('任务ID') })
+const entrySvc = new TodoService(null, () => {}, {
+  fetch: entryServer.fetch, settingsFile: path.join(dir, 'entry-settings.json'),
+})
+entrySvc.applySettings({
+  dataFile: path.join(dir, 'entry.json'),
+  feishu: { enabled: true, appId: 'a', appSecret: 'b', appToken: 'c', tableId: 'd', autoSync: false },
+})
+const entryStore = entrySvc.require()
+const entryRemoteEdit = entryStore.create({ id: 't_entry_remote', title: '共同标题（远端单侧）' })
+const entryLocalEdit = entryStore.create({ id: 't_entry_local', title: '共同标题（本地单侧）', note: '共同备注' })
+const entryConflictTask = entryStore.create({ id: 't_entry_conflict', title: '共同冲突标题' })
+await entrySvc.syncFeishu({ today: T })
+const entryRemoteRecord = [...entryServer.state.records.entries()].find(([, fields]) => fields['任务ID'] === entryRemoteEdit.id)
+const currentEntryRecord = (id) => [...entryServer.state.records.entries()].find(([, fields]) => fields['任务ID'] === id)
+entryRemoteRecord[1]['标题'] = '飞书单侧标题'
+entryStore.update(entryLocalEdit.id, { note: '本地单侧备注' })
+entryStore.update(entryConflictTask.id, { title: '本地冲突标题' })
+currentEntryRecord(entryConflictTask.id)[1]['标题'] = '飞书冲突标题'
+const entryLocalNew = entryStore.create({ id: 't_entry_new', title: '本地新任务' })
+const entryHole = { 任务ID: 't_entry_hole', 标题: '飞书独有任务', 备注: '只从飞书补回' }
+entryServer.state.records.set('rec_entry_hole', entryHole)
+entryServer.state.calls.length = 0
+const entryResult = await entrySvc.feishuEntrySync({ today: T })
+eq('entry sync imports exactly the remote-only task', entryResult.imported, 1)
+eq('the remote-only task becomes a local task', entryStore.get('t_entry_hole')?.title, '飞书独有任务')
+eq('entry sync safely applies a remote-only field edit', entryStore.get(entryRemoteEdit.id)?.title, '飞书单侧标题')
+eq('entry sync safely pushes a local-only field edit', currentEntryRecord(entryLocalEdit.id)[1]['备注'], '本地单侧备注')
+eq('entry sync creates a local-only task in Feishu',
+  [...entryServer.state.records.values()].find((fields) => fields['任务ID'] === entryLocalNew.id)?.['标题'], '本地新任务')
+eq('entry sync preserves both values for the two-sided edit',
+  [entryStore.get(entryConflictTask.id)?.title, currentEntryRecord(entryConflictTask.id)[1]['标题']],
+  ['本地冲突标题', '飞书冲突标题'])
+eq('the new pull-only row is not written back during this entry pass',
+  entryServer.state.calls.some((call) => call.pathname.endsWith('/batch_update')
+    && (call.body?.records ?? []).some((record) => record.record_id === 'rec_entry_hole')), false)
+eq('the entry payload exposes only the safe Feishu switch in task settings', entryResult.state.settings.feishu.enabled, true)
+eq('entry conflict details stay visible by task and field',
+  entryResult.conflicts.map((conflict) => [conflict.key, conflict.changes.map((change) => change.field)]),
+  [[entryConflictTask.id, ['标题']]])
+gate('entry reconciliation result is lossless JSON', entryResult)
+const entryRemoteChoice = await entrySvc.resolveFeishuConflict({
+  key: entryConflictTask.id,
+  field: '标题',
+  direction: 'remote',
+  expected: { local: '本地冲突标题', remote: '飞书冲突标题' },
+})
+eq('accepting a displayed Feishu field resolves only that field',
+  [entryRemoteChoice.resolved, entryRemoteChoice.field, entryStore.get(entryConflictTask.id)?.title],
+  [true, '标题', '飞书冲突标题'])
+eq('accepting the Feishu value leaves the unrelated note untouched', entryStore.get(entryLocalEdit.id)?.note, '本地单侧备注')
+gate('field conflict resolution is lossless JSON', entryRemoteChoice)
+entryStore.update(entryConflictTask.id, { title: '第二次本地标题' })
+currentEntryRecord(entryConflictTask.id)[1]['标题'] = '第二次飞书标题'
+const secondEntryResult = await entrySvc.feishuEntrySync({ today: T })
+const secondConflict = secondEntryResult.conflicts.find((conflict) => conflict.key === entryConflictTask.id)
+const entryLocalChoice = await entrySvc.resolveFeishuConflict({
+  key: entryConflictTask.id,
+  field: '标题',
+  direction: 'local',
+  expected: { local: '第二次本地标题', remote: '第二次飞书标题' },
+})
+eq('accepting a displayed local field pushes only the chosen local value',
+  [entryLocalChoice.resolved, currentEntryRecord(entryConflictTask.id)[1]['标题']], [true, '第二次本地标题'])
+eq('a second reconciliation clears the resolved conflict',
+  (await entrySvc.feishuEntrySync({ today: T })).conflicts.some((conflict) => conflict.key === entryConflictTask.id), false)
+gate('second entry conflict is JSON-safe', secondEntryResult)
+
+// The mirrored update timestamp is not auto-importable, but an intentional
+// Feishu-side edit may be accepted through the explicit field chooser.
+const timestampTask = entryStore.create({ id: 't_entry_timestamp', title: '更新时间冲突' })
+await entrySvc.syncFeishu({ today: T })
+const timestampScope = feishuSyncScope(normalizeFeishuSettings({ appId: 'a', appSecret: 'b', appToken: 'c', tableId: 'd' }))
+const timestampBaseline = entryStore.feishuBaseline(timestampScope)
+delete timestampBaseline[timestampTask.id]
+entryStore.setFeishuBaseline(timestampScope, timestampBaseline)
+const timestampRecord = currentEntryRecord(timestampTask.id)
+const timestampLocalBefore = entryStore.get(timestampTask.id).updatedAt
+const timestampRemote = new Date(Date.parse(`${timestampLocalBefore}Z`) + 60 * 60 * 1000)
+  .toISOString().slice(0, 19)
+timestampRecord[1][FEISHU_FIELDS.updatedAt] = timestampRemote
+const timestampEntry = await entrySvc.feishuEntrySync({ today: T })
+const timestampConflict = timestampEntry.conflicts.find((conflict) => conflict.key === timestampTask.id)
+eq('a manually edited Feishu timestamp is shown as a field conflict',
+  timestampConflict?.changes.map((change) => [change.field, change.local, change.remote]),
+  [[FEISHU_FIELDS.updatedAt, timestampLocalBefore, timestampRemote]])
+eq('the conflict has no common baseline but explicitly enables adopting a valid timestamp',
+  [timestampConflict?.changes[0]?.reason, timestampConflict?.changes[0]?.remoteCanApply], ['unknown', true])
+eq('entry checks do not automatically import the timestamp',
+  entryStore.get(timestampTask.id).updatedAt, timestampLocalBefore)
+const timestampRemoteChoice = await entrySvc.resolveFeishuConflict({
+  key: timestampTask.id,
+  field: FEISHU_FIELDS.updatedAt,
+  direction: 'remote',
+  expected: { local: timestampLocalBefore, remote: timestampRemote },
+})
+eq('explicit Feishu choice preserves its timestamp exactly',
+  [timestampRemoteChoice.resolved, entryStore.get(timestampTask.id).updatedAt], [true, timestampRemote])
+eq('the timestamp choice advances its shared baseline',
+  (await entrySvc.feishuEntrySync({ today: T })).conflicts.some((conflict) => conflict.key === timestampTask.id), false)
+gate('timestamp conflict resolution is lossless JSON', timestampRemoteChoice)
+
+const timestampLocalChoiceValue = new Date(Date.parse(`${timestampRemote}Z`) + 60 * 60 * 1000)
+  .toISOString().slice(0, 19)
+currentEntryRecord(timestampTask.id)[1][FEISHU_FIELDS.updatedAt] = timestampLocalChoiceValue
+const timestampLocalEntry = await entrySvc.feishuEntrySync({ today: T })
+const timestampLocalConflict = timestampLocalEntry.conflicts.find((conflict) => conflict.key === timestampTask.id)
+eq('the later timestamp conflict still offers a local direction',
+  timestampLocalConflict?.changes[0]?.remoteCanApply, true)
+const timestampLocalChoice = await entrySvc.resolveFeishuConflict({
+  key: timestampTask.id,
+  field: FEISHU_FIELDS.updatedAt,
+  direction: 'local',
+  expected: { local: timestampRemote, remote: timestampLocalChoiceValue },
+})
+eq('explicit local choice writes the local timestamp back to Feishu',
+  [timestampLocalChoice.resolved, currentEntryRecord(timestampTask.id)[1][FEISHU_FIELDS.updatedAt]], [true, timestampRemote])
+gate('local timestamp conflict resolution is lossless JSON', timestampLocalChoice)
+
+currentEntryRecord(timestampTask.id)[1][FEISHU_FIELDS.updatedAt] = 'not-a-timestamp'
+const invalidTimestampEntry = await entrySvc.feishuEntrySync({ today: T })
+const invalidTimestampConflict = invalidTimestampEntry.conflicts.find((conflict) => conflict.key === timestampTask.id)
+eq('an invalid Feishu timestamp cannot be adopted',
+  invalidTimestampConflict?.changes[0]?.remoteCanApply, false)
+gate('invalid timestamp conflict report is lossless JSON', invalidTimestampEntry)
+entrySvc.dispose()
+
+console.log('--- explicit Feishu choices safely restore structured history and follow-up links ---')
+const structuredServer = makeFeishuServer({ fields: requiredColumns('任务ID') })
+const structuredSvc = new TodoService(null, () => {}, {
+  fetch: structuredServer.fetch, settingsFile: path.join(dir, 'structured-settings.json'),
+})
+structuredSvc.applySettings({
+  dataFile: path.join(dir, 'structured.json'),
+  feishu: { enabled: true, appId: 'a', appSecret: 'b', appToken: 'c', tableId: 'd', autoSync: false },
+})
+const structuredStore = structuredSvc.require()
+const historyChoiceTask = structuredStore.create({ id: 't_structured_history', title: '完成记录可采用' })
+const relationSource = structuredStore.create({ id: 't_structured_source', title: '来源任务' })
+const relationFollowUp = structuredStore.create({
+  id: 't_structured_followup', title: '跟进任务', due: '2026-10-15',
+})
+await structuredSvc.syncFeishu({ today: T })
+const structuredRecordFor = (id) => [...structuredServer.state.records.entries()]
+  .find(([, fields]) => fields['任务ID'] === id)
+const historyRemoteValue = '2026-10-14 19:58:07｜已初步检查，需要再检验。'
+const historyLocalTimestamp = structuredStore.get(historyChoiceTask.id).updatedAt
+const historyRemoteTimestamp = new Date(Date.parse(`${historyLocalTimestamp}Z`) + 60 * 60 * 1000)
+  .toISOString().slice(0, 19)
+structuredRecordFor(historyChoiceTask.id)[1][FEISHU_FIELDS.completionRecords] = historyRemoteValue
+structuredRecordFor(historyChoiceTask.id)[1][FEISHU_FIELDS.updatedAt] = historyRemoteTimestamp
+const historyChoiceEntry = await structuredSvc.feishuEntrySync({ today: T })
+const historyChoiceConflict = historyChoiceEntry.conflicts.find((item) => item.key === historyChoiceTask.id)
+eq('a remote completion-history and timestamp edit remain separate field conflicts',
+  historyChoiceConflict?.changes.map((change) => change.field),
+  [FEISHU_FIELDS.completionRecords, FEISHU_FIELDS.updatedAt])
+eq('a complete timestamped completion summary enables explicit Feishu adoption',
+  historyChoiceConflict?.changes.find((change) => change.field === FEISHU_FIELDS.completionRecords)?.remoteCanApply, true)
+eq('entry checks do not auto-import completion history or an edited timestamp',
+  [structuredStore.get(historyChoiceTask.id).completionRecords, structuredStore.get(historyChoiceTask.id).updatedAt],
+  [[], historyLocalTimestamp])
+const historyRemoteChoice = await structuredSvc.resolveFeishuConflict({
+  key: historyChoiceTask.id,
+  field: FEISHU_FIELDS.completionRecords,
+  direction: 'remote',
+  expected: { local: '', remote: historyRemoteValue },
+})
+eq('explicitly adopting completion history restores its local structure',
+  [historyRemoteChoice.resolved, structuredStore.get(historyChoiceTask.id).completionRecords],
+  [true, [{ at: '2026-10-14T19:58:07', summary: '已初步检查，需要再检验。', followUpTaskId: null }]])
+eq('adopting history does not implicitly accept or overwrite the separate timestamp edit',
+  [structuredStore.get(historyChoiceTask.id).updatedAt, structuredRecordFor(historyChoiceTask.id)[1][FEISHU_FIELDS.updatedAt]],
+  [historyLocalTimestamp, historyRemoteTimestamp])
+const historyResidualConflict = (await structuredSvc.feishuEntrySync({ today: T })).conflicts
+  .find((item) => item.key === historyChoiceTask.id)
+eq('the timestamp conflict remains available for its own explicit decision',
+  historyResidualConflict?.changes.map((change) => change.field), [FEISHU_FIELDS.updatedAt])
+gate('completion history choice is lossless JSON', historyRemoteChoice)
+const historyTimestampChoice = await structuredSvc.resolveFeishuConflict({
+  key: historyChoiceTask.id,
+  field: FEISHU_FIELDS.updatedAt,
+  direction: 'remote',
+  expected: { local: historyLocalTimestamp, remote: historyRemoteTimestamp },
+})
+eq('the separate Feishu timestamp can be adopted only through its own decision',
+  [historyTimestampChoice.resolved, structuredStore.get(historyChoiceTask.id).updatedAt],
+  [true, historyRemoteTimestamp])
+gate('separate timestamp decision is lossless JSON', historyTimestampChoice)
+eq('the explicit timestamp decision clears only its own conflict',
+  (await structuredSvc.feishuEntrySync({ today: T })).conflicts.some((item) => item.key === historyChoiceTask.id), false)
+
+const relationRemoteValue = `跟进任务：${relationFollowUp.title}（${relationFollowUp.id}；未完成；截止 ${relationFollowUp.due}）`
+structuredRecordFor(relationSource.id)[1][FEISHU_FIELDS.relatedFollowUps] = relationRemoteValue
+const relationEntry = await structuredSvc.feishuEntrySync({ today: T })
+const relationConflict = relationEntry.conflicts.find((item) => item.key === relationSource.id)
+eq('a resolvable remote follow-up summary enables explicit adoption',
+  [relationConflict?.changes[0]?.field, relationConflict?.changes[0]?.remoteCanApply],
+  [FEISHU_FIELDS.relatedFollowUps, true])
+eq('the follow-up graph remains untouched before the user chooses',
+  structuredStore.get(relationFollowUp.id).followUpOf, null)
+const relationRemoteChoice = await structuredSvc.resolveFeishuConflict({
+  key: relationSource.id,
+  field: FEISHU_FIELDS.relatedFollowUps,
+  direction: 'remote',
+  expected: { local: '', remote: relationRemoteValue },
+})
+eq('explicitly adopting the summary creates only the referenced local relationship',
+  [relationRemoteChoice.resolved, structuredStore.get(relationFollowUp.id).followUpOf],
+  [true, relationSource.id])
+eq('the relation summary remains in sync after the choice',
+  (await structuredSvc.feishuEntrySync({ today: T })).conflicts.some((item) => item.key === relationSource.id), false)
+eq('the related task row is reconciled without overwriting its other fields',
+  structuredRecordFor(relationFollowUp.id)[1][FEISHU_FIELDS.relatedFollowUps],
+  `来源任务：${relationSource.title}（${relationSource.id}）`)
+gate('related follow-up choice is lossless JSON', relationRemoteChoice)
+
+const unresolvableSource = structuredStore.create({ id: 't_structured_missing', title: '无法还原缺失引用' })
+await structuredSvc.syncFeishu({ today: T })
+const missingRelationValue = '跟进任务：飞书缺失任务（t_not_in_store；未完成）'
+structuredRecordFor(unresolvableSource.id)[1][FEISHU_FIELDS.relatedFollowUps] = missingRelationValue
+const missingRelationEntry = await structuredSvc.feishuEntrySync({ today: T })
+const missingRelationConflict = missingRelationEntry.conflicts.find((item) => item.key === unresolvableSource.id)
+eq('a follow-up summary with an unknown local task id stays non-adoptable',
+  [missingRelationConflict?.changes[0]?.remoteCanApply, missingRelationConflict?.changes[0]?.remoteReason],
+  [false, '本地找不到跟进任务「t_not_in_store」；先从飞书补洞或恢复该任务'])
+eq('unresolvable Feishu relations never create or overwrite tasks implicitly',
+  [structuredStore.get('t_not_in_store'), structuredStore.get(unresolvableSource.id).followUpOf], [null, null])
+gate('an unresolvable follow-up conflict remains JSON-safe', missingRelationEntry)
+structuredSvc.dispose()
+
+console.log('--- entry previews reject a changed local or remote snapshot ---')
+const remoteRaceServer = makeFeishuServer({ fields: requiredColumns('任务ID') })
+const remoteRaceSvc = new TodoService(null, () => {}, {
+  fetch: remoteRaceServer.fetch, settingsFile: path.join(dir, 'remote-race-settings.json'),
+})
+remoteRaceSvc.applySettings({
+  dataFile: path.join(dir, 'remote-race.json'),
+  feishu: { enabled: true, appId: 'a', appSecret: 'b', appToken: 'c', tableId: 'd', autoSync: false },
+})
+const remoteRaceStore = remoteRaceSvc.require()
+const remoteRaceTask = remoteRaceStore.create({ id: 't_remote_race', title: '共同标题' })
+await remoteRaceSvc.syncFeishu({ today: T })
+const remoteRaceRecord = [...remoteRaceServer.state.records.entries()]
+  .find(([, fields]) => fields['任务ID'] === remoteRaceTask.id)
+remoteRaceRecord[1]['标题'] = '远端预览前标题'
+remoteRaceServer.state.calls.length = 0
+const originalRemoteRaceEngine = remoteRaceSvc.feishuEngine.bind(remoteRaceSvc)
+let remoteRaceTriggered = false
+remoteRaceSvc.feishuEngine = (...args) => {
+  const engine = originalRemoteRaceEngine(...args)
+  const applyRemote = engine.applyRemote.bind(engine)
+  engine.applyRemote = async (options) => {
+    const result = await applyRemote(options)
+    if (options.dryRun === true && result.planned > 0 && !remoteRaceTriggered) {
+      remoteRaceTriggered = true
+      remoteRaceStore.update(remoteRaceTask.id, { note: '预览后本地新备注' })
+    }
+    return result
+  }
+  return engine
+}
+const remoteRaceResult = await remoteRaceSvc.feishuEntrySync({ today: T })
+eq('a local edit after remote-import preview marks entry sync stale', remoteRaceResult.stale, true)
+eq('the preview race retains the local edit', remoteRaceStore.get(remoteRaceTask.id)?.note, '预览后本地新备注')
+eq('the preview race does not apply an older Feishu field snapshot',
+  remoteRaceStore.get(remoteRaceTask.id)?.title, '共同标题')
+eq('the preview race writes no remote row',
+  remoteRaceServer.state.calls.some((call) => /\/batch_(?:create|update|delete)$/.test(call.pathname)), false)
+remoteRaceSvc.dispose()
+
+const syncRaceServer = makeFeishuServer({ fields: requiredColumns('任务ID') })
+const syncRaceSvc = new TodoService(null, () => {}, {
+  fetch: syncRaceServer.fetch, settingsFile: path.join(dir, 'sync-race-settings.json'),
+})
+syncRaceSvc.applySettings({
+  dataFile: path.join(dir, 'sync-race.json'),
+  feishu: { enabled: true, appId: 'a', appSecret: 'b', appToken: 'c', tableId: 'd', autoSync: false },
+})
+const syncRaceStore = syncRaceSvc.require()
+const syncRaceTask = syncRaceStore.create({ id: 't_sync_race', title: '共同标题' })
+await syncRaceSvc.syncFeishu({ today: T })
+syncRaceStore.update(syncRaceTask.id, { title: '预览中的本地标题' })
+const syncRaceRecord = [...syncRaceServer.state.records.entries()].find(([, fields]) => fields['任务ID'] === syncRaceTask.id)
+syncRaceServer.state.calls.length = 0
+const originalSyncRaceEngine = syncRaceSvc.feishuEngine.bind(syncRaceSvc)
+let syncRaceTriggered = false
+syncRaceSvc.feishuEngine = (...args) => {
+  const engine = originalSyncRaceEngine(...args)
+  const run = engine.run.bind(engine)
+  engine.run = async (options) => {
+    const result = await run(options)
+    if (options.dryRun === true && options.conflictPolicy === 'skip' && !syncRaceTriggered) {
+      syncRaceTriggered = true
+      syncRaceServer.state.records.get(syncRaceRecord[0])['备注'] = '预览后飞书新备注'
+    }
+    return result
+  }
+  return engine
+}
+const syncRaceResult = await syncRaceSvc.feishuEntrySync({ today: T })
+eq('a Feishu edit after push preview marks entry sync stale', syncRaceResult.stale, true)
+eq('the preview race retains the newer remote field',
+  syncRaceServer.state.records.get(syncRaceRecord[0])['备注'], '预览后飞书新备注')
+eq('the preview race does not push the stale local row',
+  syncRaceServer.state.records.get(syncRaceRecord[0])['标题'], '共同标题')
+eq('the stale push preview makes no batch write',
+  syncRaceServer.state.calls.some((call) => /\/batch_(?:create|update|delete)$/.test(call.pathname)), false)
+syncRaceSvc.dispose()
+
+console.log('--- task deletion conflicts require an explicit direction ---')
+const localDeleteServer = makeFeishuServer({ fields: requiredColumns('任务ID') })
+const localDeleteSvc = new TodoService(null, () => {}, {
+  fetch: localDeleteServer.fetch, settingsFile: path.join(dir, 'local-delete-resolve-settings.json'),
+})
+localDeleteSvc.applySettings({
+  dataFile: path.join(dir, 'local-delete-resolve.json'),
+  feishu: { enabled: true, appId: 'a', appSecret: 'b', appToken: 'c', tableId: 'd', deleteRemoved: true },
+})
+const localDeleteStore = localDeleteSvc.require()
+const localDeletedTask = localDeleteStore.create({ id: 't_delete_restore', title: '删除后待恢复', note: '共同备注' })
+await localDeleteSvc.syncFeishu({ today: T })
+const localDeletedRecord = [...localDeleteServer.state.records.entries()]
+  .find(([, fields]) => fields['任务ID'] === localDeletedTask.id)
+localDeleteStore.remove(localDeletedTask.id)
+localDeleteServer.state.records.get(localDeletedRecord[0])['备注'] = '飞书新备注'
+const localDeleteEntry = await localDeleteSvc.feishuEntrySync({ today: T })
+const localDeleteConflict = localDeleteEntry.conflicts.find((conflict) => conflict.key === localDeletedTask.id)
+eq('entry sync retains a local tombstone when Feishu changed the deleted row',
+  [localDeleteStore.get(localDeletedTask.id), localDeleteStore.tombstones()], [null, [localDeletedTask.id]])
+eq('the conflict is marked as a local-delete operation', localDeleteConflict?.operation, 'delete')
+const restoredByChoice = await localDeleteSvc.resolveFeishuConflict({
+  key: localDeletedTask.id, field: '__delete__', operation: 'delete', direction: 'remote',
+  expected: { changes: localDeleteConflict?.changes ?? [] },
+})
+eq('accepting the Feishu row restores the deleted local task',
+  [restoredByChoice.resolved, localDeleteStore.get(localDeletedTask.id)?.note], [true, '飞书新备注'])
+eq('restoring a Feishu row clears its local tombstone', localDeleteStore.tombstones(), [])
+eq('restoring a Feishu row does not rewrite it remotely',
+  localDeleteServer.state.records.get(localDeletedRecord[0])['备注'], '飞书新备注')
+gate('Feishu-wins deletion resolution is JSON-safe', restoredByChoice)
+localDeleteSvc.dispose()
+
+const remoteDeleteServer = makeFeishuServer({ fields: requiredColumns('任务ID') })
+const remoteDeleteSvc = new TodoService(null, () => {}, {
+  fetch: remoteDeleteServer.fetch, settingsFile: path.join(dir, 'remote-delete-resolve-settings.json'),
+})
+remoteDeleteSvc.applySettings({
+  dataFile: path.join(dir, 'remote-delete-resolve.json'),
+  feishu: { enabled: true, appId: 'a', appSecret: 'b', appToken: 'c', tableId: 'd', syncSubtasks: true },
+})
+const remoteDeleteStore = remoteDeleteSvc.require()
+const remoteDeleteParent = remoteDeleteStore.create({ id: 't_remote_deleted_parent', title: '飞书已删除的父任务' })
+const remoteDeleteChild = remoteDeleteStore.addSubtask(remoteDeleteParent.id, { id: 't_remote_deleted_child', title: '必须保留的子任务' })
+await remoteDeleteSvc.syncFeishu({ today: T })
+const remoteParentRow = [...remoteDeleteServer.state.records.entries()]
+  .find(([, fields]) => fields['任务ID'] === remoteDeleteParent.id)
+remoteDeleteServer.state.records.delete(remoteParentRow[0])
+const remoteDeleteEntry = await remoteDeleteSvc.feishuEntrySync({ today: T })
+const remoteDeleteConflict = remoteDeleteEntry.conflicts.find((conflict) => conflict.key === remoteDeleteParent.id)
+eq('entry sync detects a remote deletion without recreating it',
+  [remoteDeleteStore.get(remoteDeleteParent.id)?.title, remoteDeleteConflict?.operation],
+  [remoteDeleteParent.title, 'remote-delete'])
+const acceptedRemoteDelete = await remoteDeleteSvc.resolveFeishuConflict({
+  key: remoteDeleteParent.id, field: '__delete__', operation: 'remote-delete', direction: 'remote', today: T,
+  expected: { changes: remoteDeleteConflict?.changes ?? [] },
+})
+eq('accepting the Feishu deletion removes only its target and detaches children',
+  [acceptedRemoteDelete.resolved, remoteDeleteStore.get(remoteDeleteParent.id),
+    remoteDeleteStore.get(remoteDeleteChild.id)?.parentId],
+  [true, null, null])
+eq('accepting a Feishu deletion does not create a local deletion tombstone',
+  remoteDeleteStore.tombstones().includes(remoteDeleteParent.id), false)
+eq('the detached child remains a real local task', remoteDeleteStore.get(remoteDeleteChild.id)?.title, '必须保留的子任务')
+gate('Feishu-delete acceptance is JSON-safe', acceptedRemoteDelete)
+remoteDeleteSvc.dispose()
+
+const keepLocalDeleteServer = makeFeishuServer({ fields: requiredColumns('任务ID') })
+const keepLocalDeleteSvc = new TodoService(null, () => {}, {
+  fetch: keepLocalDeleteServer.fetch, settingsFile: path.join(dir, 'keep-local-delete-settings.json'),
+})
+keepLocalDeleteSvc.applySettings({
+  dataFile: path.join(dir, 'keep-local-delete.json'),
+  feishu: { enabled: true, appId: 'a', appSecret: 'b', appToken: 'c', tableId: 'd' },
+})
+const keepLocalDeleteStore = keepLocalDeleteSvc.require()
+const keepLocalTask = keepLocalDeleteStore.create({ id: 't_remote_delete_keep_local', title: '本地仍要保留' })
+await keepLocalDeleteSvc.syncFeishu({ today: T })
+const keepLocalRecord = [...keepLocalDeleteServer.state.records.entries()]
+  .find(([, fields]) => fields['任务ID'] === keepLocalTask.id)
+keepLocalDeleteServer.state.records.delete(keepLocalRecord[0])
+const keepLocalEntry = await keepLocalDeleteSvc.feishuEntrySync({ today: T })
+const keepLocalConflict = keepLocalEntry.conflicts.find((conflict) => conflict.key === keepLocalTask.id)
+const keptLocalDecision = await keepLocalDeleteSvc.resolveFeishuConflict({
+  key: keepLocalTask.id, field: '__delete__', operation: 'remote-delete', direction: 'local', today: T,
+  expected: { changes: keepLocalConflict?.changes ?? [] },
+})
+eq('choosing local after a Feishu deletion recreates exactly that row',
+  [keptLocalDecision.resolved,
+    [...keepLocalDeleteServer.state.records.values()].find((fields) => fields['任务ID'] === keepLocalTask.id)?.['标题']],
+  [true, '本地仍要保留'])
+eq('choosing local does not remove the task from the workspace',
+  keepLocalDeleteStore.get(keepLocalTask.id)?.title, '本地仍要保留')
+gate('local-wins remote-delete resolution is JSON-safe', keptLocalDecision)
+keepLocalDeleteSvc.dispose()
+
+console.log('--- queued entry checks run after the active Feishu operation ---')
+const queueServer = makeFeishuServer({ fields: requiredColumns('任务ID') })
+const queueSvc = new TodoService(null, () => {}, {
+  fetch: queueServer.fetch, settingsFile: path.join(dir, 'queue-settings.json'),
+})
+queueSvc.applySettings({
+  dataFile: path.join(dir, 'queue.json'),
+  feishu: { enabled: true, appId: 'a', appSecret: 'b', appToken: 'c', tableId: 'd', autoSync: false },
+})
+queueSvc.require()
+queueSvc.feishuRunning = true
+const queuedEntry = await queueSvc.feishuEntrySync({})
+eq('an entry check during a running Feishu operation is reported as busy', queuedEntry.busy, true)
+eq('the overlapping entry check queues one follow-up reconciliation', queueSvc.feishuQueued, true)
+eq('a busy entry check does not start another network request', queueServer.state.calls.length, 0)
+queueSvc.feishuRunning = false
+queueSvc.drainFeishuQueue()
+await new Promise((resolve) => setTimeout(resolve, 30))
+eq('the queued entry reconciliation completes after the lock is released',
+  queueSvc.feishuStatus().lastSync?.ok, true)
+eq('the queued follow-up drains exactly once', queueSvc.feishuQueued, false)
+eq('one queued entry follow-up performs one reconciliation pass',
+  queueServer.state.calls.filter((call) => call.pathname.includes('/records?')).length, 4)
+queueSvc.dispose()
 
 console.log('--- auto-sync is opt-in and debounced ---')
 const autoServer = makeFeishuServer()
@@ -505,6 +1078,165 @@ eq('a mutation schedules a sync once autoSync is on', auto.feishuStatus().schedu
 auto.dispose()
 eq('disposing cancels the queued sync', auto.feishuStatus().scheduled, false)
 eq('disposing wrote nothing to the table', autoServer.state.calls.length, 0)
+
+const autoConflictServer = makeFeishuServer()
+const autoConflictLogs = []
+const autoConflict = new TodoService(null, (message) => autoConflictLogs.push(message), {
+  fetch: autoConflictServer.fetch, settingsFile: path.join(dir, 'auto-conflict-settings.json'),
+})
+autoConflict.applySettings({
+  dataFile: path.join(dir, 'auto-conflict.json'),
+  feishu: { enabled: true, appId: 'a', appSecret: 'b', appToken: 'c', tableId: 'd', autoSync: false },
+})
+const autoConflictStore = autoConflict.require()
+const autoConflictTask = autoConflictStore.create({ id: 't_auto_conflict', title: '自动同步冲突' })
+await autoConflict.syncFeishu({})
+const autoConflictRecord = [...autoConflictServer.state.records.entries()].find(([, fields]) => fields['任务ID'] === autoConflictTask.id)
+autoConflictRecord[1]['标题'] = '飞书端自动冲突值'
+autoConflictRecord[1]['备注'] = '飞书端独立手写的备注'
+const autoForeignRecordId = 'rec_foreign_auto'
+autoConflictServer.state.records.set(autoForeignRecordId, {
+  任务ID: 't_foreign_auto', 标题: '飞书独有任务', 备注: '飞书独有内容',
+})
+autoConflictStore.update(autoConflictTask.id, { title: '本地端自动冲突值' })
+const autoAddedTask = autoConflictStore.create({ id: 't_auto_new', title: '本地新增任务' })
+// Only inspect the second (automatic) run's writes. This is the reported
+// regression shape: a local add must not turn into a replacement of the table.
+autoConflictServer.state.calls.length = 0
+autoConflict.applySettings({
+  dataFile: path.join(dir, 'auto-conflict.json'),
+  feishu: { enabled: true, appId: 'a', appSecret: 'b', appToken: 'c', tableId: 'd', autoSync: true },
+})
+await autoConflict.feishuRunAuto()
+eq('automatic sync skips rather than overwriting a conflict', autoConflictRecord[1]['标题'], '飞书端自动冲突值')
+eq('automatic sync preserves a remote-only field on the conflicted row',
+  autoConflictRecord[1]['备注'], '飞书端独立手写的备注')
+eq('automatic sync preserves rows that exist only in Feishu',
+  autoConflictServer.state.records.get(autoForeignRecordId), {
+    任务ID: 't_foreign_auto', 标题: '飞书独有任务', 备注: '飞书独有内容',
+  })
+const autoAddedRecord = [...autoConflictServer.state.records.entries()].find(([, fields]) => fields['任务ID'] === autoAddedTask.id)
+eq('automatic sync still adds the new local task', autoAddedRecord?.[1]?.['标题'], '本地新增任务')
+eq('the local-add regression only issues a create, never a table-wide update or deletion',
+  autoConflictServer.state.calls.filter((call) => /\/batch_(?:create|update|delete)$/.test(call.pathname))
+    .map((call) => call.pathname.split('/').at(-1)), ['batch_create'])
+eq('automatic conflict details remain visible in last-sync status',
+  autoConflict.feishuStatus().lastSync.summary.skippedConflicts, 1)
+ok('automatic sync reports both values in the host log',
+  autoConflictLogs.some((message) => message.includes('本地端自动冲突值') && message.includes('飞书端自动冲突值')),
+  autoConflictLogs)
+autoConflict.dispose()
+
+// A pre-existing table may have no saved baseline yet (for example, when
+// auto-sync is enabled before the first successful sync). In that state an
+// unknown difference is still a conflict, never a reason to push the local copy.
+const autoUnknownServer = makeFeishuServer()
+const autoUnknown = new TodoService(null, () => {}, {
+  fetch: autoUnknownServer.fetch, settingsFile: path.join(dir, 'auto-unknown-settings.json'),
+})
+autoUnknown.applySettings({
+  dataFile: path.join(dir, 'auto-unknown.json'),
+  feishu: { enabled: true, appId: 'a', appSecret: 'b', appToken: 'c', tableId: 'd', autoSync: false, deleteRemoved: true },
+})
+const autoUnknownStore = autoUnknown.require()
+const autoUnknownTask = autoUnknownStore.create({ id: 't_auto_unknown', title: '本地已有任务', note: '本地备注' })
+autoUnknownServer.state.records.set('rec_unknown_baseline', {
+  ...taskToFields(autoUnknownTask, autoUnknownStore, { today: T }),
+  备注: '飞书已有的手写备注',
+})
+const autoUnknownDeleted = autoUnknownStore.create({
+  id: 't_auto_unknown_deleted', title: '无基准的本地删除', note: '本地删除时的备注',
+})
+autoUnknownServer.state.records.set('rec_unknown_deleted', {
+  ...taskToFields(autoUnknownDeleted, autoUnknownStore, { today: T }),
+  备注: '飞书删除前手写的备注',
+})
+autoUnknownStore.remove(autoUnknownDeleted.id)
+const autoUnknownAdded = autoUnknownStore.create({ id: 't_auto_unknown_new', title: '本地新增任务' })
+autoUnknown.applySettings({
+  dataFile: path.join(dir, 'auto-unknown.json'),
+  feishu: { enabled: true, appId: 'a', appSecret: 'b', appToken: 'c', tableId: 'd', autoSync: true, deleteRemoved: true },
+})
+await autoUnknown.feishuRunAuto()
+eq('without a baseline, automatic sync does not overwrite an existing Feishu field',
+  autoUnknownServer.state.records.get('rec_unknown_baseline')['备注'], '飞书已有的手写备注')
+eq('without a baseline, automatic sync still creates a new local task',
+  [...autoUnknownServer.state.records.values()].find((fields) => fields['任务ID'] === autoUnknownAdded.id)?.['标题'], '本地新增任务')
+eq('without a baseline, automatic sync does not delete a remotely populated tombstone row',
+  autoUnknownServer.state.records.get('rec_unknown_deleted')['备注'], '飞书删除前手写的备注')
+eq('unknown-baseline update and deletion conflicts are reported instead of guessed',
+  autoUnknown.feishuStatus().lastSync.summary.skippedConflicts, 2)
+eq('the unknown-baseline deletion tombstone remains available for review',
+  autoUnknownStore.tombstones(), [autoUnknownDeleted.id])
+autoUnknown.dispose()
+
+// A tombstone is not permission to erase newer Feishu-side work. Even with
+// deleteRemoved enabled, a row changed since the last common state needs an
+// explicit local-push decision; auto-sync must keep it and retain the tombstone.
+const deleteConflictStore = new TodoStore({ dataFile: path.join(dir, 'delete-conflict.json'), saveDelay: 5 }).load()
+const deleteConflictTask = deleteConflictStore.create({ id: 't_delete_conflict', title: '删除冲突任务', note: '共同备注' })
+const deleteConflictServer = makeFeishuServer()
+const deleteConflictSync = new FeishuSync({ ...config, deleteRemoved: true }, deleteConflictStore, {
+  fetch: deleteConflictServer.fetch, now: fixedNow,
+})
+await deleteConflictSync.run({ today: T })
+const deleteConflictRecord = [...deleteConflictServer.state.records.entries()]
+  .find(([, fields]) => fields['任务ID'] === deleteConflictTask.id)
+deleteConflictStore.remove(deleteConflictTask.id)
+deleteConflictRecord[1]['备注'] = '飞书新写的备注'
+deleteConflictRecord[1]['飞书自定义列'] = '不能随删除丢失的内容'
+const deletePreview = await deleteConflictSync.run({ today: T, dryRun: true })
+eq('a remote edit after local deletion blocks the default plan', deletePreview.blocked, true)
+const deleteConflictChanges = deletePreview.conflicts[0]?.changes ?? []
+ok('the deletion conflict identifies a changed baseline field',
+  deleteConflictChanges.some((change) => change.field === '备注' && change.reason === 'remote'), deleteConflictChanges)
+ok('the deletion conflict also protects an untracked non-empty field',
+  deleteConflictChanges.some((change) => change.field === '飞书自定义列' && change.reason === 'unknown'), deleteConflictChanges)
+eq('a conflicted deletion is not planned', deletePreview.planned.deleted, 0)
+const deleteSkipped = await deleteConflictSync.run({ today: T, conflictPolicy: 'skip' })
+eq('skip policy preserves the remotely edited row',
+  deleteConflictServer.state.records.get(deleteConflictRecord[0]), deleteConflictRecord[1])
+eq('skip policy retains the local tombstone for a later explicit decision',
+  deleteConflictStore.tombstones(), [deleteConflictTask.id])
+eq('skip policy reports the deletion conflict', deleteSkipped.skippedConflicts, 1)
+const deletePushed = await deleteConflictSync.run({ today: T, conflictPolicy: 'push' })
+eq('the explicit local-push decision deletes the conflicted row', deletePushed.deleted, 1)
+eq('the completed deletion retires its tombstone', deleteConflictStore.tombstones(), [])
+
+const autoDeleteServer = makeFeishuServer()
+const autoDeleteLogs = []
+const autoDelete = new TodoService(null, (message) => autoDeleteLogs.push(message), {
+  fetch: autoDeleteServer.fetch, settingsFile: path.join(dir, 'auto-delete-settings.json'),
+})
+autoDelete.applySettings({
+  dataFile: path.join(dir, 'auto-delete.json'),
+  feishu: { enabled: true, appId: 'a', appSecret: 'b', appToken: 'c', tableId: 'd', autoSync: false, deleteRemoved: true },
+})
+const autoDeleteStore = autoDelete.require()
+const autoDeleteTask = autoDeleteStore.create({ id: 't_auto_delete', title: '本地后来删除的任务', note: '共同备注' })
+await autoDelete.syncFeishu({})
+const autoDeleteRecord = [...autoDeleteServer.state.records.entries()]
+  .find(([, fields]) => fields['任务ID'] === autoDeleteTask.id)
+autoDeleteRecord[1]['备注'] = '飞书新写的备注'
+autoDeleteStore.remove(autoDeleteTask.id)
+const autoAfterDeleteAdd = autoDeleteStore.create({ id: 't_auto_after_delete', title: '删除后新增任务' })
+autoDelete.applySettings({
+  dataFile: path.join(dir, 'auto-delete.json'),
+  feishu: { enabled: true, appId: 'a', appSecret: 'b', appToken: 'c', tableId: 'd', autoSync: true, deleteRemoved: true },
+})
+await autoDelete.feishuRunAuto()
+eq('adding a task cannot auto-delete a remotely edited tombstone row',
+  autoDeleteServer.state.records.get(autoDeleteRecord[0])['备注'], '飞书新写的备注')
+eq('adding a task still reaches Feishu while the deletion conflict is skipped',
+  [...autoDeleteServer.state.records.values()].find((fields) => fields['任务ID'] === autoAfterDeleteAdd.id)?.['标题'], '删除后新增任务')
+eq('automatic sync keeps the unresolved deletion tombstone',
+  autoDeleteStore.tombstones(), [autoDeleteTask.id])
+eq('automatic deletion conflict is visible in status',
+  autoDelete.feishuStatus().lastSync.summary.skippedConflicts, 1)
+ok('automatic deletion conflict is explained in the host log',
+  autoDeleteLogs.some((message) => message.includes('（本地已删除）') && message.includes('飞书新写的备注')),
+  autoDeleteLogs)
+autoDelete.dispose()
 
 // ---------------------------------------------------------------------------
 // the setup and diagnosis surface: test / fields / reconcile / pull
@@ -562,15 +1294,17 @@ console.log('--- a sync must never delete rows it does not own (reported bug) --
   const again = await onSync.run({ today: T })
   eq('and the next sync is a no-op', [again.created, again.updated, again.deleted], [0, 0, 0])
 }
-// A task restored from the table must not be deleted by the next sync: the pull
-// reuses the row's key as the local id, so the tombstone has to be dropped.
+// A task restored from the table reuses its existing local id; the tombstone
+// has to be dropped on restoration, never by making a second duplicate task.
 {
   const store = new TodoStore({ dataFile: path.join(dir, 'restore.json'), saveDelay: 5 }).load()
   store.create({ id: 't_X', title: 'X' })
   store.remove('t_X')
   eq('the deletion left a tombstone', store.tombstones(), ['t_X'])
-  store.create({ id: 't_X', title: 'X（从飞书补回来）' })
-  eq('re-creating the id clears it', store.tombstones(), [])
+  store.restore('t_X', { source: 'trash' })
+  store.update('t_X', { title: 'X（从飞书补回来）' })
+  eq('restoring the same id clears the tombstone', store.tombstones(), [])
+  eq('restoration does not duplicate the task id', store.all().filter((task) => task.id === 't_X').length, 1)
 }
 
 console.log('--- required columns ---')
@@ -695,7 +1429,8 @@ eq('a changed field shows up as a difference', diffReport.differing.length, 1)
 eq('and the field is named', diffReport.differing[0].fields.includes('标题'), true)
 
 console.log('--- pull: import only what is missing locally ---')
-const pullStore = new TodoStore({ dataFile: path.join(dir, 'pull.json') }).load()
+let pullNotifications = 0
+const pullStore = new TodoStore({ dataFile: path.join(dir, 'pull.json'), onChange: () => { pullNotifications++ } }).load()
 pullStore.create({ id: 't_keep', title: '本地已有，标题不能被远端覆盖' })
 pullStore.flush()
 const pullServer = makeFeishuServer({ fields: wanted })
@@ -705,8 +1440,8 @@ seed(pullServer, [
     标签: 'A, B', 截止时间: '2026-09-30', 完成: '是', 重复: '每周 周五' },
   { 标题: '没有任务ID的行' },
 ])
-const pullSync = new FeishuSync({ ...FEISHU_DEFAULTS, appId: 'a', appSecret: 'b', appToken: 'c', tableId: 'd', keyField: '任务ID' },
-  pullStore, { fetch: pullServer.fetch })
+const pullConfig = { ...FEISHU_DEFAULTS, appId: 'a', appSecret: 'b', appToken: 'c', tableId: 'd', keyField: '任务ID' }
+const pullSync = new FeishuSync(pullConfig, pullStore, { fetch: pullServer.fetch })
 const pullPreview = await pullSync.pull({ dryRun: true })
 eq('the preview plans exactly the holes', pullPreview.planned, 1)
 eq('and names the task', pullPreview.items.map((i) => i.title), ['远端多出来的任务'])
@@ -716,8 +1451,17 @@ ok('and says the 重复 column cannot be restored', pullPreview.notRestored.incl
 eq('the local task was not touched by the preview', pullStore.get('t_keep').title, '本地已有，标题不能被远端覆盖')
 gate('the pull preview payload is lossless JSON', pullPreview)
 
+pullNotifications = 0
 const pulled = await pullSync.pull({})
 eq('the pull created the hole', pulled.created, 1)
+eq('the pull reports the ids it imported for the entry coordinator', pulled.createdKeys, ['t_hole'])
+eq('an imported task does not trigger the user-mutation/auto-sync hook', pullNotifications, 0)
+const importedBaseline = pullStore.feishuBaseline(feishuSyncScope(pullConfig))['t_hole']
+ok('a pulled task gets a non-secret per-field baseline for common and blank cells',
+  importedBaseline?.['标题']?.startsWith('sha256:') === true
+  && importedBaseline?.['备注']?.startsWith('sha256:') === true
+  && importedBaseline?.['状态']?.startsWith('sha256:') === true
+  && !Object.values(importedBaseline ?? {}).includes('远端多出来的任务'), importedBaseline)
 const restored = pullStore.get('t_hole')
 eq('with the remote key as its id', restored.id, 't_hole')
 eq('with its title', restored.title, '远端多出来的任务')
@@ -733,6 +1477,106 @@ eq('the existing local task was NOT overwritten', pullStore.get('t_keep').title,
 const pulledAgain = await pullSync.pull({})
 eq('a second pull has nothing left to do', pulledAgain.created, 0)
 eq('and plans nothing', pulledAgain.holes, 0)
+
+console.log('--- apply remote edits only after a matching preview and confirmation ---')
+{
+  let notifications = 0
+  const applyStore = new TodoStore({
+    dataFile: path.join(dir, 'apply-remote.json'),
+    onChange: () => { notifications++ },
+    saveDelay: 5,
+  }).load()
+  const remoteList = applyStore.createList({ name: '本地清单' })
+  const target = applyStore.create({
+    id: 't_apply', title: '本地标题', note: '本地备注', listId: remoteList.id,
+    due: '2026-09-20', start: '2026-09-18', priority: 1, tags: ['本地'],
+    recurrence: { freq: 'weekly', weekdays: [5] },
+  })
+  const sparse = applyStore.create({ id: 't_sparse', title: '稀疏本地标题', note: '缺列不应清空' })
+  applyStore.flush()
+  notifications = 0
+  const applyServer = makeFeishuServer({ fields: wanted })
+  const remoteTarget = {
+    ...taskToFields(target, applyStore, { today: T }),
+    标题: '飞书标题', 备注: '飞书备注', 完成: '是', 清单: '飞书清单', 优先级: '高',
+    截止时间: '2026-10-30', 开始时间: '2026-10-20', 标签: '远端, alpha',
+    重复: '飞书写的重复句子', 状态: '飞书自由文本状态', 逾期: '否', 子任务进度: '9/9',
+    完成记录: '2030-01-01｜不能导入的历史', 关联跟进: '跟进任务：别猜',
+    创建时间: '2030-01-01T00:00:00.000Z', 更新时间: '2030-01-02T00:00:00.000Z',
+  }
+  seed(applyServer, [
+    remoteTarget,
+    { ...taskToFields(sparse, applyStore, { today: T }), 标题: '远端稀疏标题' },
+    { 任务ID: 't_remote_only', 标题: '远端独有，不应在更新本地时创建' },
+  ])
+  const applySync = new FeishuSync({ ...config, syncSubtasks: true }, applyStore, {
+    fetch: applyServer.fetch, now: fixedNow,
+  })
+  const applyPreview = await applySync.applyRemote({ dryRun: true })
+  eq('preview plans changes for the existing ID-matched rows', applyPreview.planned, 2)
+  ok('preview has an opaque confirmation token', typeof applyPreview.previewToken === 'string' && applyPreview.previewToken.length === 64)
+  eq('preview does not mutate the local task', applyStore.get(target.id).title, '本地标题')
+  eq('preview does not trigger auto-sync', notifications, 0)
+  ok('non-reversible and derived fields are listed rather than guessed',
+    ['重复', '状态', '逾期', '子任务进度', '完成记录', '关联跟进', '创建时间', '更新时间'].every((field) => applyPreview.notApplied.includes(field)),
+    applyPreview.notApplied)
+  ok('the preview explicitly shows unsupported field differences',
+    applyPreview.items.find((item) => item.key === target.id).changes.some((change) => change.field === '重复' && change.applied === false))
+  gate('the apply-remote preview payload is lossless JSON', applyPreview)
+  const applyScope = feishuSyncScope(config)
+  const emptyApplyBaseline = applyStore.feishuBaseline(applyScope)
+  applyStore.setFeishuBaseline(applyScope, {
+    ...emptyApplyBaseline,
+    [target.id]: { 标题: 'sha256:changed-after-preview' },
+  })
+  const staleBaselineApply = await applySync.applyRemote({ expectedToken: applyPreview.previewToken })
+  eq('a baseline change after reverse-import preview invalidates confirmation', staleBaselineApply.stale, true)
+  eq('a stale reverse-import leaves the local value unchanged', applyStore.get(target.id).title, '本地标题')
+  gate('the stale baseline result is lossless JSON', staleBaselineApply)
+  applyStore.setFeishuBaseline(applyScope, emptyApplyBaseline)
+
+  const applied = await applySync.applyRemote({ expectedToken: applyPreview.previewToken })
+  eq('confirmation applies only the matching remote snapshot', applied.updated, 2)
+  eq('remote title is applied', applyStore.get(target.id).title, '飞书标题')
+  eq('remote note is applied', applyStore.get(target.id).note, '飞书备注')
+  eq('remote completion boolean is imported', applyStore.get(target.id).done, true)
+  eq('remote completion import does not invent a completion timestamp', applyStore.get(target.id).completedAt, null)
+  eq('remote completion import does not fabricate history', applyStore.get(target.id).completionRecords, [])
+  eq('remote completion import does not advance a recurring task',
+    [applyStore.get(target.id).due, applyStore.get(target.id).completedCount], ['2026-10-30', 0])
+  eq('supported list changes create their list silently', applyStore.listByname('飞书清单') !== null, true)
+  eq('remote priority, dates, and tags are imported',
+    [applyStore.get(target.id).priority, applyStore.get(target.id).start, applyStore.get(target.id).tags],
+    [3, '2026-10-20', ['远端', 'alpha']])
+  eq('a blank omitted cell is not mistaken for a deliberate clear', applyStore.get(sparse.id).note, '缺列不应清空')
+  eq('the remote-only task remains the separate additive pull operation', applyStore.get('t_remote_only'), null)
+  eq('confirmed reverse import never triggers the user mutation hook', notifications, 0)
+  gate('the apply-remote result is lossless JSON', applied)
+
+  const targetRecord = [...applyServer.state.records.entries()].find(([, fields]) => fields['任务ID'] === target.id)
+  targetRecord[1]['备注'] = '预览时的飞书备注'
+  const stalePreview = await applySync.applyRemote({ dryRun: true })
+  targetRecord[1]['备注'] = '预览后又改了备注'
+  const staleApply = await applySync.applyRemote({ expectedToken: stalePreview.previewToken })
+  eq('a remote edit after preview invalidates reverse-import confirmation', staleApply.stale, true)
+  eq('a stale reverse import leaves local data unchanged', applyStore.get(target.id).note, '飞书备注')
+  eq('stale reverse-import result is JSON-safe', snapshotJsonValue(staleApply) !== null, true)
+
+  const noOpPreview = await applySync.applyRemote({ dryRun: true })
+  ok('the no-op stale-token case starts with a real remote-to-local change', noOpPreview.planned > 0)
+  applyStore.updateFromFeishu(target.id, { note: '预览后又改了备注' })
+  const staleNoOpApply = await applySync.applyRemote({ expectedToken: noOpPreview.previewToken })
+  eq('a stale token is rejected even when the changed snapshot now plans no writes', staleNoOpApply.stale, true)
+  eq('the no-op stale confirmation leaves the chosen local value intact',
+    applyStore.get(target.id).note, '预览后又改了备注')
+
+  targetRecord[1]['标题'] = 'schema 变化预览值'
+  const schemaPreview = await applySync.applyRemote({ dryRun: true })
+  applyServer.state.fields = applyServer.state.fields.filter((field) => field !== '标题')
+  const schemaStale = await applySync.applyRemote({ expectedToken: schemaPreview.previewToken })
+  eq('a table schema change also invalidates the reverse-import preview', schemaStale.stale, true)
+  eq('a schema-stale preview leaves the local title untouched', applyStore.get(target.id).title, '飞书标题')
+}
 
 console.log('--- pull refuses a table with no usable key column ---')
 const noKeyServer = makeFeishuServer({ fields: wanted })
@@ -759,8 +1603,8 @@ eq('the mapping reads the parent link', mapped.input.parentId, 't_parent')
 eq('the mapping keeps the creation stamp', mapped.input.createdAt, '2026-09-01T00:00:00.000Z')
 eq('the mapping reads 中 as priority 2', mapped.input.priority, 2)
 eq('a derived column is not restored', Object.keys(mapped.input).includes('状态'), false)
-eq('non-restorable recurrence, completion history, and follow-up labels are reported',
-  mapped.notRestored, ['重复', '完成记录', '关联跟进'])
+eq('non-restorable recurrence, completion history, derived status, and follow-up labels are reported',
+  mapped.notRestored, ['重复', '完成记录', '关联跟进', '状态', '逾期', '子任务进度'])
 const unlinked = remoteRowToTask({ 标题: 'x', 父任务: '找不到的父' }, '任务ID', () => null)
 eq('an unresolvable parent is reported', unlinked.unlinkedParent, '找不到的父')
 eq('and no parentId is invented', Object.keys(unlinked.input).includes('parentId'), false)
