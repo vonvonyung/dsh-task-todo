@@ -1038,6 +1038,16 @@ const Icon = seat('sidebar.panellist').Component
 // entry reconciliation be asserted without touching a real table.
 uiFeishuMock.enabled = true
 uiFeishuMock.enableEntry = true
+// The first background check returns a conflict: the dialog must remain closed
+// until the user chooses to open it from the compact header status control.
+uiFeishuMock.conflicts = [{
+  key: 't_ui_conflict', title: '离线冲突任务', fields: ['标题', '完成记录', '关联跟进'],
+  changes: [
+    { field: '标题', local: '本地离线标题', remote: '飞书离线标题', reason: 'both', remoteCanApply: true },
+    { field: '完成记录', local: '', remote: '2026-10-14 19:58:07｜已初步检查，需要再检验。', reason: 'remote', remoteCanApply: true },
+    { field: '关联跟进', local: '', remote: '跟进任务：人社大厅叫号屏维修（t_mv822wxi15n5；未完成；截止 2026-10-15）', reason: 'remote', remoteCanApply: true },
+  ],
+}]
 ui.render(React.createElement(Panel, {}))
 overlay.render(React.createElement(Overlay, {}))
 ok('the first paint says it is loading', ui.text().includes('正在载入待办任务'), ui.text().slice(0, 80))
@@ -1045,23 +1055,33 @@ await ui.settle()
 ok('after the first fetch the shell renders', ui.find('待办任务') !== undefined, ui.text().slice(0, 120))
 ok('the empty state explains the rapid-add syntax', ui.text().includes('在下面一行直接输入'), ui.text().slice(0, 200))
 ok('entering the task view starts one background Feishu check', uiFeishuMock.entryCalls.length === 1, uiFeishuMock.entryCalls)
-ok('the entry check does not hide the task view and reports its status',
-  ui.byClass('td-feishu-syncbar').length === 1 && ui.find('全部任务') !== undefined,
+ok('the task view has no persistent conflict banner above its content',
+  ui.byClass('td-feishu-syncbar').length === 0 && ui.find('全部任务') !== undefined,
   ui.byClass('td-feishu-syncbar').length)
-uiFeishuMock.conflicts = [{
-  key: 't_ui_conflict', title: '离线冲突任务', fields: ['标题'],
-  changes: [{ field: '标题', local: '本地离线标题', remote: '飞书离线标题', reason: 'both', remoteCanApply: true }],
-}]
-const entryRefreshButton = ui.byClass('td-feishu-syncbar').flatMap((node) => node.children)
-  .find((node) => typeof node !== 'string' && node.tag === 'button' && ui.text(node) === '重新检查')
-entryRefreshButton?.props.onClick({})
+const feishuTrigger = ui.byClass('td-feishu-trigger')[0]
+ok('the header exposes a compact Feishu status control', feishuTrigger !== undefined)
+ok('background conflicts update the status without auto-opening a dialog',
+  feishuTrigger !== undefined && ui.text(feishuTrigger).includes('冲突 1') && overlay.byClass('td-feishu-sync-dialog').length === 0,
+  { label: feishuTrigger === undefined ? null : ui.text(feishuTrigger), dialogs: overlay.byClass('td-feishu-sync-dialog').length })
+feishuTrigger?.props.onClick({})
 await ui.settle()
-ok('the task view presents a field-level conflict with both values',
-  ui.byClass('td-feishu-conflict').length === 1
-  && ui.text().includes('本地离线标题') && ui.text().includes('飞书离线标题'),
-  ui.byClass('td-feishu-conflict').length)
-const applyFeishuChoice = ui.byClass('td-feishu-choice').flatMap((node) => node.children)
-  .find((node) => typeof node !== 'string' && node.tag === 'button' && ui.text(node) === '采用飞书')
+ok('clicking the compact status opens the conflict dialog on demand',
+  overlay.byClass('td-feishu-sync-dialog').length === 1 && overlay.byClass('td-feishu-conflict').length === 1)
+ok('the opened conflict dialog shows both preserved values',
+  overlay.text().includes('本地离线标题') && overlay.text().includes('飞书离线标题'))
+const structuredChoiceFor = (field) => {
+  const row = overlay.byClass('td-feishu-field-conflict').find((node) =>
+    overlay.text(node.children?.[0]?.children?.[0]) === field)
+  return row?.children?.[1]?.children?.find((node) =>
+    typeof node !== 'string' && node.tag === 'button' && overlay.text(node) === '采用飞书')
+}
+for (const field of ['完成记录', '关联跟进']) {
+  const choice = structuredChoiceFor(field)
+  ok(`${field} conflicts expose an enabled Feishu choice when the remote summary is reversible`,
+    choice !== undefined && choice.props.disabled !== true, choice?.props)
+}
+const applyFeishuChoice = overlay.byClass('td-feishu-choice').flatMap((node) => node.children)
+  .find((node) => typeof node !== 'string' && node.tag === 'button' && overlay.text(node) === '采用飞书')
 ok('field conflicts offer a direct Feishu-side choice', applyFeishuChoice !== undefined)
 applyFeishuChoice?.props.onClick({})
 await ui.settle()
@@ -1071,35 +1091,52 @@ ok('the Feishu-side choice calls the exact conflict resolver',
   && uiFeishuMock.resolveCalls.at(-1)?.expected?.local === '本地离线标题'
   && uiFeishuMock.resolveCalls.at(-1)?.expected?.remote === '飞书离线标题',
   uiFeishuMock.resolveCalls.at(-1))
-ok('a resolved field is removed from the pending conflict list', ui.byClass('td-feishu-conflict').length === 0)
-ok('the resolver rechecks after applying the user choice', uiFeishuMock.entryCalls.length >= 3, uiFeishuMock.entryCalls.length)
+ok('a resolved field is removed from the pending conflict list', overlay.byClass('td-feishu-conflict').length === 0)
+ok('the resolver rechecks after applying the user choice', uiFeishuMock.entryCalls.length >= 2, uiFeishuMock.entryCalls.length)
 uiFeishuMock.conflicts = [{
   key: 't_ui_timestamp', title: '手动编辑更新时间', fields: ['更新时间'],
   changes: [{ field: '更新时间', local: '2026-10-14T22:36:42', remote: '2026-10-14T23:36:42', reason: 'unknown', remoteCanApply: true }],
 }]
-const timestampRefreshButton = ui.byClass('td-feishu-syncbar').flatMap((node) => node.children)
-  .find((node) => typeof node !== 'string' && node.tag === 'button' && ui.text(node) === '重新检查')
+const syncDialogButtons = () => {
+  const dialog = overlay.byClass('td-feishu-sync-dialog')[0]
+  if (dialog === undefined) return []
+  const insideDialog = (node) => {
+    let parent = node.parent
+    while (parent !== null && parent !== undefined) {
+      if (parent === dialog) return true
+      parent = parent.parent
+    }
+    return false
+  }
+  return overlay.tag('button').filter(insideDialog)
+}
+const timestampRefreshButton = syncDialogButtons()
+  .find((node) => typeof node !== 'string' && node.tag === 'button' && overlay.text(node) === '重新检查')
 timestampRefreshButton?.props.onClick({})
 await ui.settle()
-const applyTimestampChoice = ui.byClass('td-feishu-choice').flatMap((node) => node.children)
-  .find((node) => typeof node !== 'string' && node.tag === 'button' && ui.text(node) === '采用飞书')
+const applyTimestampChoice = overlay.byClass('td-feishu-choice').flatMap((node) => node.children)
+  .find((node) => typeof node !== 'string' && node.tag === 'button' && overlay.text(node) === '采用飞书')
 ok('a valid manually edited Feishu timestamp can be explicitly adopted',
   applyTimestampChoice !== undefined && applyTimestampChoice.props.disabled !== true,
   applyTimestampChoice?.props)
 const entryCallsBeforeBusy = uiFeishuMock.entryCalls.length
 uiFeishuMock.busyReplies = 1
-const busyRefreshButton = ui.byClass('td-feishu-syncbar').flatMap((node) => node.children)
-  .find((node) => typeof node !== 'string' && node.tag === 'button' && ui.text(node) === '重新检查')
+const busyRefreshButton = syncDialogButtons()
+  .find((node) => typeof node !== 'string' && node.tag === 'button' && overlay.text(node) === '重新检查')
 busyRefreshButton?.props.onClick({})
 await ui.settle()
 ok('a queued entry result clearly reports that another sync is still running',
-  ui.text().includes('正在后台检查飞书'))
+  overlay.text().includes('正在后台检查飞书'))
 await ui.wait(1350)
 await ui.settle()
 ok('the task view retries after a busy response and clears the busy state',
   uiFeishuMock.entryCalls.length === entryCallsBeforeBusy + 2
-  && !ui.text().includes('正在后台检查飞书'), uiFeishuMock.entryCalls.length - entryCallsBeforeBusy)
-ok('the overlay seat renders nothing while idle', overlay.byClass('td-modal').length === 0)
+  && !overlay.text().includes('正在后台检查飞书'), uiFeishuMock.entryCalls.length - entryCallsBeforeBusy)
+const closeFeishuDialog = syncDialogButtons()
+  .find((node) => node.props['aria-label'] === '关闭')
+closeFeishuDialog?.props.onClick({})
+await ui.settle()
+ok('closing the Feishu dialog leaves the overlay seat idle', overlay.byClass('td-modal').length === 0)
 ok('the smart-list rail is present',
   ui.byClass('td-side').length >= 6, ui.byClass('td-side').length)
 const smartRailKeys = ui.byClass('td-side')

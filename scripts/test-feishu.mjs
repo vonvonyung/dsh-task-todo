@@ -749,6 +749,109 @@ eq('an invalid Feishu timestamp cannot be adopted',
 gate('invalid timestamp conflict report is lossless JSON', invalidTimestampEntry)
 entrySvc.dispose()
 
+console.log('--- explicit Feishu choices safely restore structured history and follow-up links ---')
+const structuredServer = makeFeishuServer({ fields: requiredColumns('任务ID') })
+const structuredSvc = new TodoService(null, () => {}, {
+  fetch: structuredServer.fetch, settingsFile: path.join(dir, 'structured-settings.json'),
+})
+structuredSvc.applySettings({
+  dataFile: path.join(dir, 'structured.json'),
+  feishu: { enabled: true, appId: 'a', appSecret: 'b', appToken: 'c', tableId: 'd', autoSync: false },
+})
+const structuredStore = structuredSvc.require()
+const historyChoiceTask = structuredStore.create({ id: 't_structured_history', title: '完成记录可采用' })
+const relationSource = structuredStore.create({ id: 't_structured_source', title: '来源任务' })
+const relationFollowUp = structuredStore.create({
+  id: 't_structured_followup', title: '跟进任务', due: '2026-10-15',
+})
+await structuredSvc.syncFeishu({ today: T })
+const structuredRecordFor = (id) => [...structuredServer.state.records.entries()]
+  .find(([, fields]) => fields['任务ID'] === id)
+const historyRemoteValue = '2026-10-14 19:58:07｜已初步检查，需要再检验。'
+const historyLocalTimestamp = structuredStore.get(historyChoiceTask.id).updatedAt
+const historyRemoteTimestamp = new Date(Date.parse(`${historyLocalTimestamp}Z`) + 60 * 60 * 1000)
+  .toISOString().slice(0, 19)
+structuredRecordFor(historyChoiceTask.id)[1][FEISHU_FIELDS.completionRecords] = historyRemoteValue
+structuredRecordFor(historyChoiceTask.id)[1][FEISHU_FIELDS.updatedAt] = historyRemoteTimestamp
+const historyChoiceEntry = await structuredSvc.feishuEntrySync({ today: T })
+const historyChoiceConflict = historyChoiceEntry.conflicts.find((item) => item.key === historyChoiceTask.id)
+eq('a remote completion-history and timestamp edit remain separate field conflicts',
+  historyChoiceConflict?.changes.map((change) => change.field),
+  [FEISHU_FIELDS.completionRecords, FEISHU_FIELDS.updatedAt])
+eq('a complete timestamped completion summary enables explicit Feishu adoption',
+  historyChoiceConflict?.changes.find((change) => change.field === FEISHU_FIELDS.completionRecords)?.remoteCanApply, true)
+eq('entry checks do not auto-import completion history or an edited timestamp',
+  [structuredStore.get(historyChoiceTask.id).completionRecords, structuredStore.get(historyChoiceTask.id).updatedAt],
+  [[], historyLocalTimestamp])
+const historyRemoteChoice = await structuredSvc.resolveFeishuConflict({
+  key: historyChoiceTask.id,
+  field: FEISHU_FIELDS.completionRecords,
+  direction: 'remote',
+  expected: { local: '', remote: historyRemoteValue },
+})
+eq('explicitly adopting completion history restores its local structure',
+  [historyRemoteChoice.resolved, structuredStore.get(historyChoiceTask.id).completionRecords],
+  [true, [{ at: '2026-10-14T19:58:07', summary: '已初步检查，需要再检验。', followUpTaskId: null }]])
+eq('adopting history does not implicitly accept or overwrite the separate timestamp edit',
+  [structuredStore.get(historyChoiceTask.id).updatedAt, structuredRecordFor(historyChoiceTask.id)[1][FEISHU_FIELDS.updatedAt]],
+  [historyLocalTimestamp, historyRemoteTimestamp])
+const historyResidualConflict = (await structuredSvc.feishuEntrySync({ today: T })).conflicts
+  .find((item) => item.key === historyChoiceTask.id)
+eq('the timestamp conflict remains available for its own explicit decision',
+  historyResidualConflict?.changes.map((change) => change.field), [FEISHU_FIELDS.updatedAt])
+gate('completion history choice is lossless JSON', historyRemoteChoice)
+const historyTimestampChoice = await structuredSvc.resolveFeishuConflict({
+  key: historyChoiceTask.id,
+  field: FEISHU_FIELDS.updatedAt,
+  direction: 'remote',
+  expected: { local: historyLocalTimestamp, remote: historyRemoteTimestamp },
+})
+eq('the separate Feishu timestamp can be adopted only through its own decision',
+  [historyTimestampChoice.resolved, structuredStore.get(historyChoiceTask.id).updatedAt],
+  [true, historyRemoteTimestamp])
+gate('separate timestamp decision is lossless JSON', historyTimestampChoice)
+eq('the explicit timestamp decision clears only its own conflict',
+  (await structuredSvc.feishuEntrySync({ today: T })).conflicts.some((item) => item.key === historyChoiceTask.id), false)
+
+const relationRemoteValue = `跟进任务：${relationFollowUp.title}（${relationFollowUp.id}；未完成；截止 ${relationFollowUp.due}）`
+structuredRecordFor(relationSource.id)[1][FEISHU_FIELDS.relatedFollowUps] = relationRemoteValue
+const relationEntry = await structuredSvc.feishuEntrySync({ today: T })
+const relationConflict = relationEntry.conflicts.find((item) => item.key === relationSource.id)
+eq('a resolvable remote follow-up summary enables explicit adoption',
+  [relationConflict?.changes[0]?.field, relationConflict?.changes[0]?.remoteCanApply],
+  [FEISHU_FIELDS.relatedFollowUps, true])
+eq('the follow-up graph remains untouched before the user chooses',
+  structuredStore.get(relationFollowUp.id).followUpOf, null)
+const relationRemoteChoice = await structuredSvc.resolveFeishuConflict({
+  key: relationSource.id,
+  field: FEISHU_FIELDS.relatedFollowUps,
+  direction: 'remote',
+  expected: { local: '', remote: relationRemoteValue },
+})
+eq('explicitly adopting the summary creates only the referenced local relationship',
+  [relationRemoteChoice.resolved, structuredStore.get(relationFollowUp.id).followUpOf],
+  [true, relationSource.id])
+eq('the relation summary remains in sync after the choice',
+  (await structuredSvc.feishuEntrySync({ today: T })).conflicts.some((item) => item.key === relationSource.id), false)
+eq('the related task row is reconciled without overwriting its other fields',
+  structuredRecordFor(relationFollowUp.id)[1][FEISHU_FIELDS.relatedFollowUps],
+  `来源任务：${relationSource.title}（${relationSource.id}）`)
+gate('related follow-up choice is lossless JSON', relationRemoteChoice)
+
+const unresolvableSource = structuredStore.create({ id: 't_structured_missing', title: '无法还原缺失引用' })
+await structuredSvc.syncFeishu({ today: T })
+const missingRelationValue = '跟进任务：飞书缺失任务（t_not_in_store；未完成）'
+structuredRecordFor(unresolvableSource.id)[1][FEISHU_FIELDS.relatedFollowUps] = missingRelationValue
+const missingRelationEntry = await structuredSvc.feishuEntrySync({ today: T })
+const missingRelationConflict = missingRelationEntry.conflicts.find((item) => item.key === unresolvableSource.id)
+eq('a follow-up summary with an unknown local task id stays non-adoptable',
+  [missingRelationConflict?.changes[0]?.remoteCanApply, missingRelationConflict?.changes[0]?.remoteReason],
+  [false, '本地找不到跟进任务「t_not_in_store」；先从飞书补洞或恢复该任务'])
+eq('unresolvable Feishu relations never create or overwrite tasks implicitly',
+  [structuredStore.get('t_not_in_store'), structuredStore.get(unresolvableSource.id).followUpOf], [null, null])
+gate('an unresolvable follow-up conflict remains JSON-safe', missingRelationEntry)
+structuredSvc.dispose()
+
 console.log('--- entry previews reject a changed local or remote snapshot ---')
 const remoteRaceServer = makeFeishuServer({ fields: requiredColumns('任务ID') })
 const remoteRaceSvc = new TodoService(null, () => {}, {
