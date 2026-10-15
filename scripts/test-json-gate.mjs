@@ -15,6 +15,7 @@ import http from 'node:http'
 import { pathToFileURL } from 'node:url'
 import { isJsonValue, snapshotJsonValue } from '@deepseek-ai/dsh-util-values'
 import { addDays, today as todayStr } from '../lib/recurrence.js'
+import { FEISHU_FIELDS, requiredColumns } from '../lib/feishu.js'
 import { unzipSync } from 'fflate'
 
 // Workspace-local scratch space: the system temp directory is not reliably
@@ -222,6 +223,10 @@ let pullRefused = null
 try { await call('task_sync_feishu', { action: 'pull' }) } catch (e) { pullRefused = e }
 ok('task_sync_feishu action=pull is behind the enable switch',
   pullRefused !== null && String(pullRefused.message).includes('未启用'), pullRefused?.message)
+let applyRemoteRefused = null
+try { await call('task_sync_feishu', { action: 'applyRemote', dryRun: true }) } catch (e) { applyRemoteRefused = e }
+ok('task_sync_feishu action=applyRemote is behind the enable switch',
+  applyRemoteRefused !== null && String(applyRemoteRefused.message).includes('未启用'), applyRemoteRefused?.message)
 
 console.log('--- HTTP API surfaces ---')
 const server = http.createServer((req, res) => {
@@ -388,6 +393,11 @@ ok('API feishuPull answers ok:false while the switch is off',
   pullDenied.status === 200 && pullDenied.body.ok === false
   && String(pullDenied.body.error).includes('未启用'), pullDenied.body)
 gate('API feishuPull unconfigured payload', pullDenied.body)
+const applyRemoteDenied = await api('feishuApplyRemote', {})
+ok('API feishuApplyRemote answers ok:false while the switch is off',
+  applyRemoteDenied.status === 200 && applyRemoteDenied.body.ok === false
+  && String(applyRemoteDenied.body.error).includes('未启用'), applyRemoteDenied.body)
+gate('API feishuApplyRemote unconfigured payload', applyRemoteDenied.body)
 const missing = await api('noSuchMethod', {})
 ok('unknown methods 404', missing.status === 404, missing.status)
 gate('API unknown-method payload', missing.body)
@@ -512,6 +522,148 @@ ok('and the task really landed', bareTask !== undefined && bareTask.priority ===
 const unknownAdd = await command.handler({ rawInput: 'frobnicate', commandId: 'todo' })
 ok('so is a word that looks like nothing else',
   unknownAdd.kind === 'success' && unknownAdd.text.includes('frobnicate'), unknownAdd.text)
+
+console.log('--- Feishu agent and slash-command preview/confirm flow ---')
+const nativeFetch = globalThis.fetch
+const feishuRows = new Map()
+let fakeRecordId = 1
+const feishuColumns = requiredColumns('任务ID')
+const feishuReply = (data) => new Response(JSON.stringify({ code: 0, msg: 'ok', data }), {
+  status: 200, headers: { 'content-type': 'application/json; charset=utf-8' },
+})
+globalThis.fetch = async (input, init = {}) => {
+  const requestUrl = new URL(typeof input === 'string' ? input : input.url)
+  if (requestUrl.hostname !== 'open.feishu.cn') return nativeFetch(input, init)
+  const pathname = requestUrl.pathname
+  const body = typeof init.body === 'string' ? JSON.parse(init.body) : null
+  if (pathname === '/open-apis/auth/v3/tenant_access_token/internal') {
+    return new Response(JSON.stringify({ code: 0, msg: 'ok', tenant_access_token: 'gate-token', expire: 7200 }), {
+      status: 200, headers: { 'content-type': 'application/json; charset=utf-8' },
+    })
+  }
+  if (pathname.endsWith('/fields') && init.method === 'GET') {
+    return feishuReply({
+      items: feishuColumns.map((field_name, index) => ({ field_id: `fld_${index}`, field_name, type: 1 })),
+      has_more: false,
+    })
+  }
+  if (pathname.endsWith('/records') && init.method === 'GET') {
+    return feishuReply({
+      items: [...feishuRows.entries()].map(([record_id, fields]) => ({ record_id, fields })),
+      has_more: false,
+    })
+  }
+  if (pathname.endsWith('/batch_create')) {
+    const records = (body?.records ?? []).map(({ fields }) => {
+      const record_id = `rec_${fakeRecordId++}`
+      feishuRows.set(record_id, { ...fields })
+      return { record_id, fields }
+    })
+    return feishuReply({ records })
+  }
+  if (pathname.endsWith('/batch_update')) {
+    const records = (body?.records ?? []).map(({ record_id, fields }) => {
+      const current = feishuRows.get(record_id) ?? {}
+      feishuRows.set(record_id, { ...current, ...fields })
+      return { record_id, fields: feishuRows.get(record_id) }
+    })
+    return feishuReply({ records })
+  }
+  if (pathname.endsWith('/batch_delete')) {
+    const records = (body?.records ?? []).filter((record_id) => feishuRows.delete(record_id)).map((record_id) => ({ record_id }))
+    return feishuReply({ records })
+  }
+  return new Response(JSON.stringify({ code: 404, msg: `unhandled fake Feishu path: ${pathname}` }), {
+    status: 200, headers: { 'content-type': 'application/json; charset=utf-8' },
+  })
+}
+
+const configured = await api('updateSettings', {
+  feishu: { enabled: true, appId: 'gate-app', appSecret: 'gate-secret', appToken: 'gate-app-token', tableId: 'gate-table' },
+})
+ok('the agent/command fixture enables Feishu without exposing its secret',
+  configured.body.ok === true && !JSON.stringify(configured.body).includes('gate-secret'), configured.body)
+const interfaceTask = await call('task_add', { title: 'Agent 与命令同步目标' })
+const initialAgentSync = await call('task_sync_feishu', { action: 'sync' })
+gate('task_sync_feishu action=sync with a configured fake table', initialAgentSync)
+ok('the initial Agent sync establishes the remote row', initialAgentSync.summary.created >= 1, initialAgentSync.summary)
+const interfaceRecord = [...feishuRows.entries()].find(([, fields]) => fields['任务ID'] === interfaceTask.created.id)
+interfaceRecord[1][FEISHU_FIELDS.title] = '飞书端 Agent 值'
+await call('task_update', { id: interfaceTask.created.id, title: '本地端 Agent 值' })
+const conflictedAgentSync = await call('task_sync_feishu', { action: 'sync', dryRun: true })
+gate('task_sync_feishu conflict preview is lossless JSON', conflictedAgentSync)
+ok('the Agent sync reports a conflict without writing',
+  conflictedAgentSync.summary.blocked === true
+  && conflictedAgentSync.text.includes('本地端 Agent 值')
+  && conflictedAgentSync.text.includes('飞书端 Agent 值'), conflictedAgentSync)
+const conflictStatus = await call('task_sync_feishu', { action: 'status' })
+gate('task_sync_feishu status with a remembered conflict', conflictStatus)
+ok('the status action keeps conflict values visible after a blocked sync',
+  conflictStatus.text.includes('本地端 Agent 值') && conflictStatus.text.includes('飞书端 Agent 值'), conflictStatus.text)
+const agentPreview = await call('task_sync_feishu', { action: 'applyRemote', dryRun: true })
+gate('task_sync_feishu action=applyRemote preview', agentPreview)
+ok('the Agent reverse-import preview returns a confirmation token',
+  typeof agentPreview.result.previewToken === 'string' && agentPreview.text.includes('预览'), agentPreview)
+const agentApplied = await call('task_sync_feishu', {
+  action: 'applyRemote', previewToken: agentPreview.result.previewToken,
+})
+gate('task_sync_feishu action=applyRemote confirmation', agentApplied)
+ok('the Agent confirmation updates the matching existing task',
+  (await call('task_list', { filter: 'all' })).tasks.find((task) => task.id === interfaceTask.created.id)?.title === '飞书端 Agent 值')
+
+interfaceRecord[1][FEISHU_FIELDS.title] = '飞书端 HTTP 值'
+await call('task_update', { id: interfaceTask.created.id, title: '本地端 HTTP 值' })
+const httpApplyPreview = await api('feishuApplyRemote', { dryRun: true })
+gate('HTTP feishuApplyRemote preview', httpApplyPreview.body)
+ok('the HTTP preview returns a confirmation token',
+  typeof httpApplyPreview.body.data.previewToken === 'string', httpApplyPreview.body.data)
+const httpApplied = await api('feishuApplyRemote', { previewToken: httpApplyPreview.body.data.previewToken })
+gate('HTTP feishuApplyRemote confirmation', httpApplied.body)
+ok('the HTTP confirmation updates the existing task',
+  httpApplied.body.data.updated === 1
+  && (await call('task_list', { filter: 'all' })).tasks.find((task) => task.id === interfaceTask.created.id)?.title === '飞书端 HTTP 值',
+  httpApplied.body.data)
+
+interfaceRecord[1][FEISHU_FIELDS.title] = '飞书端命令值'
+await call('task_update', { id: interfaceTask.created.id, title: '本地端命令值' })
+const commandPreview = await command.handler({ rawInput: 'sync 更新本地预览', commandId: 'todo' })
+ok('the slash command recognizes the documented reverse-preview wording',
+  commandPreview.kind === 'success' && commandPreview.text.includes('本地端命令值')
+  && commandPreview.text.includes('飞书端命令值'), commandPreview)
+const commandApplied = await command.handler({ rawInput: 'sync 确认更新本地', commandId: 'todo' })
+ok('the slash command confirms the same preview',
+  commandApplied.kind === 'success' && commandApplied.text.includes('已更新 1 项'), commandApplied)
+ok('the slash command imported the Feishu value',
+  (await call('task_list', { filter: 'all' })).tasks.find((task) => task.id === interfaceTask.created.id)?.title === '飞书端命令值')
+const currentInterfaceRecord = () => [...feishuRows.entries()].find(([, fields]) => fields['任务ID'] === interfaceTask.created.id)
+const entryHttp = await api('feishuEntrySync', { view: 'list' })
+gate('HTTP feishuEntrySync', entryHttp.body)
+ok('the entry endpoint returns enabled task settings without leaking credentials',
+  entryHttp.body.ok === true
+  && entryHttp.body.data.state.settings.feishu.enabled === true
+  && !JSON.stringify(entryHttp.body).includes('gate-secret'), entryHttp.body)
+currentInterfaceRecord()[1][FEISHU_FIELDS.title] = 'HTTP 冲突飞书值'
+await call('task_update', { id: interfaceTask.created.id, title: 'HTTP 冲突本地值' })
+const conflictEntryHttp = await api('feishuEntrySync', { view: 'list' })
+gate('HTTP entry sync retains both sides of a field conflict', conflictEntryHttp.body)
+const httpConflict = conflictEntryHttp.body.data.conflicts.find((item) => item.key === interfaceTask.created.id)
+ok('the entry endpoint returns one task/field conflict with both values',
+  httpConflict?.changes.some((change) => change.field === FEISHU_FIELDS.title
+    && change.local === 'HTTP 冲突本地值' && change.remote === 'HTTP 冲突飞书值'), httpConflict)
+const httpResolved = await api('feishuResolveConflict', {
+  view: 'list', key: interfaceTask.created.id, field: FEISHU_FIELDS.title, direction: 'local',
+  expected: { local: 'HTTP 冲突本地值', remote: 'HTTP 冲突飞书值' },
+})
+gate('HTTP feishuResolveConflict local choice', httpResolved.body)
+ok('the HTTP conflict resolver returns a confirmed field decision',
+  httpResolved.body.ok === true && httpResolved.body.data.resolved === true
+  && currentInterfaceRecord()[1][FEISHU_FIELDS.title] === 'HTTP 冲突本地值', httpResolved.body)
+const entryAfterResolve = await api('feishuEntrySync', { view: 'list' })
+ok('the next HTTP entry check has no remaining conflict for the resolved field',
+  !entryAfterResolve.body.data.conflicts.some((item) => item.key === interfaceTask.created.id
+    && item.changes.some((change) => change.field === FEISHU_FIELDS.title)), entryAfterResolve.body.data.conflicts)
+gate('HTTP entry state after conflict resolution', entryAfterResolve.body)
+globalThis.fetch = nativeFetch
 
 server.close()
 fs.rmSync(scratch, { recursive: true, force: true })
