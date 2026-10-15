@@ -1073,6 +1073,19 @@ ok('the Feishu-side choice calls the exact conflict resolver',
   uiFeishuMock.resolveCalls.at(-1))
 ok('a resolved field is removed from the pending conflict list', ui.byClass('td-feishu-conflict').length === 0)
 ok('the resolver rechecks after applying the user choice', uiFeishuMock.entryCalls.length >= 3, uiFeishuMock.entryCalls.length)
+uiFeishuMock.conflicts = [{
+  key: 't_ui_timestamp', title: '手动编辑更新时间', fields: ['更新时间'],
+  changes: [{ field: '更新时间', local: '2026-10-14T22:36:42', remote: '2026-10-14T23:36:42', reason: 'unknown', remoteCanApply: true }],
+}]
+const timestampRefreshButton = ui.byClass('td-feishu-syncbar').flatMap((node) => node.children)
+  .find((node) => typeof node !== 'string' && node.tag === 'button' && ui.text(node) === '重新检查')
+timestampRefreshButton?.props.onClick({})
+await ui.settle()
+const applyTimestampChoice = ui.byClass('td-feishu-choice').flatMap((node) => node.children)
+  .find((node) => typeof node !== 'string' && node.tag === 'button' && ui.text(node) === '采用飞书')
+ok('a valid manually edited Feishu timestamp can be explicitly adopted',
+  applyTimestampChoice !== undefined && applyTimestampChoice.props.disabled !== true,
+  applyTimestampChoice?.props)
 const entryCallsBeforeBusy = uiFeishuMock.entryCalls.length
 uiFeishuMock.busyReplies = 1
 const busyRefreshButton = ui.byClass('td-feishu-syncbar').flatMap((node) => node.children)

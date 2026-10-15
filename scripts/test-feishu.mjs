@@ -689,6 +689,64 @@ eq('accepting a displayed local field pushes only the chosen local value',
 eq('a second reconciliation clears the resolved conflict',
   (await entrySvc.feishuEntrySync({ today: T })).conflicts.some((conflict) => conflict.key === entryConflictTask.id), false)
 gate('second entry conflict is JSON-safe', secondEntryResult)
+
+// The mirrored update timestamp is not auto-importable, but an intentional
+// Feishu-side edit may be accepted through the explicit field chooser.
+const timestampTask = entryStore.create({ id: 't_entry_timestamp', title: '更新时间冲突' })
+await entrySvc.syncFeishu({ today: T })
+const timestampScope = feishuSyncScope(normalizeFeishuSettings({ appId: 'a', appSecret: 'b', appToken: 'c', tableId: 'd' }))
+const timestampBaseline = entryStore.feishuBaseline(timestampScope)
+delete timestampBaseline[timestampTask.id]
+entryStore.setFeishuBaseline(timestampScope, timestampBaseline)
+const timestampRecord = currentEntryRecord(timestampTask.id)
+const timestampLocalBefore = entryStore.get(timestampTask.id).updatedAt
+const timestampRemote = new Date(Date.parse(`${timestampLocalBefore}Z`) + 60 * 60 * 1000)
+  .toISOString().slice(0, 19)
+timestampRecord[1][FEISHU_FIELDS.updatedAt] = timestampRemote
+const timestampEntry = await entrySvc.feishuEntrySync({ today: T })
+const timestampConflict = timestampEntry.conflicts.find((conflict) => conflict.key === timestampTask.id)
+eq('a manually edited Feishu timestamp is shown as a field conflict',
+  timestampConflict?.changes.map((change) => [change.field, change.local, change.remote]),
+  [[FEISHU_FIELDS.updatedAt, timestampLocalBefore, timestampRemote]])
+eq('the conflict has no common baseline but explicitly enables adopting a valid timestamp',
+  [timestampConflict?.changes[0]?.reason, timestampConflict?.changes[0]?.remoteCanApply], ['unknown', true])
+eq('entry checks do not automatically import the timestamp',
+  entryStore.get(timestampTask.id).updatedAt, timestampLocalBefore)
+const timestampRemoteChoice = await entrySvc.resolveFeishuConflict({
+  key: timestampTask.id,
+  field: FEISHU_FIELDS.updatedAt,
+  direction: 'remote',
+  expected: { local: timestampLocalBefore, remote: timestampRemote },
+})
+eq('explicit Feishu choice preserves its timestamp exactly',
+  [timestampRemoteChoice.resolved, entryStore.get(timestampTask.id).updatedAt], [true, timestampRemote])
+eq('the timestamp choice advances its shared baseline',
+  (await entrySvc.feishuEntrySync({ today: T })).conflicts.some((conflict) => conflict.key === timestampTask.id), false)
+gate('timestamp conflict resolution is lossless JSON', timestampRemoteChoice)
+
+const timestampLocalChoiceValue = new Date(Date.parse(`${timestampRemote}Z`) + 60 * 60 * 1000)
+  .toISOString().slice(0, 19)
+currentEntryRecord(timestampTask.id)[1][FEISHU_FIELDS.updatedAt] = timestampLocalChoiceValue
+const timestampLocalEntry = await entrySvc.feishuEntrySync({ today: T })
+const timestampLocalConflict = timestampLocalEntry.conflicts.find((conflict) => conflict.key === timestampTask.id)
+eq('the later timestamp conflict still offers a local direction',
+  timestampLocalConflict?.changes[0]?.remoteCanApply, true)
+const timestampLocalChoice = await entrySvc.resolveFeishuConflict({
+  key: timestampTask.id,
+  field: FEISHU_FIELDS.updatedAt,
+  direction: 'local',
+  expected: { local: timestampRemote, remote: timestampLocalChoiceValue },
+})
+eq('explicit local choice writes the local timestamp back to Feishu',
+  [timestampLocalChoice.resolved, currentEntryRecord(timestampTask.id)[1][FEISHU_FIELDS.updatedAt]], [true, timestampRemote])
+gate('local timestamp conflict resolution is lossless JSON', timestampLocalChoice)
+
+currentEntryRecord(timestampTask.id)[1][FEISHU_FIELDS.updatedAt] = 'not-a-timestamp'
+const invalidTimestampEntry = await entrySvc.feishuEntrySync({ today: T })
+const invalidTimestampConflict = invalidTimestampEntry.conflicts.find((conflict) => conflict.key === timestampTask.id)
+eq('an invalid Feishu timestamp cannot be adopted',
+  invalidTimestampConflict?.changes[0]?.remoteCanApply, false)
+gate('invalid timestamp conflict report is lossless JSON', invalidTimestampEntry)
 entrySvc.dispose()
 
 console.log('--- entry previews reject a changed local or remote snapshot ---')
