@@ -1298,8 +1298,11 @@ await settleAll(3)
 ok('the header opens a frame-wide appearance dialog',
   overlay.byClass('td-style-modal').length === 1
   && overlay.byClass('td-modal-layer').some((node) => node.props['data-todo-appearance'] === 'flat'))
-eq('the picker exposes exactly the three approved styles', overlay.byClass('td-style-choice').length, 3)
+eq('the picker exposes the three layouts and the four palettes', overlay.byClass('td-style-choice').length, 7)
+eq('the palettes are grouped apart from the layouts', overlay.byClass('td-style-palettes').length, 1)
 eq('the playful choice renders its own CSS preview class', overlay.byClass('td-style-mini-playful').length, 1)
+ok('every 方案 C palette renders its own preview swatch',
+  ['c1', 'c2', 'c3', 'c4'].every((id) => overlay.byClass(`td-style-mini-${id}`).length === 1))
 eq('the picker marks flat as the active style', styleOption('简洁扁平').props['aria-pressed'], 'true')
 ok('the editorial style is directly selectable', styleOption('杂志编辑') !== undefined)
 styleOption('杂志编辑').props.onClick({})
@@ -1326,6 +1329,24 @@ styleOption('简洁扁平').props.onClick({})
 await settleAll(4)
 eq('the flat style can be restored and is persisted', (await api('settings')).values.appearance, 'flat')
 eq('the panel root returns to flat after the save', panelRoot().props['data-todo-appearance'], 'flat')
+styleButton().props.onClick({})
+await settleAll(2)
+ok('the mint palette is directly selectable', styleOption('薄荷奶霜') !== undefined)
+styleOption('薄荷奶霜').props.onClick({})
+await settleAll(4)
+eq('selecting a palette saves it through the real settings API',
+  (await api('settings')).values.appearance, 'c3')
+eq('the panel repaints as the selected palette immediately',
+  panelRoot().props['data-todo-appearance'], 'c3')
+ok('the palette survives a fresh state read', (await api('state')).settings.appearance === 'c3')
+ui.byClass('td-icon').find((node) => node.props['aria-label'] === '重新载入').props.onClick({})
+await settleAll(3)
+eq('reloading state keeps the palette', panelRoot().props['data-todo-appearance'], 'c3')
+styleButton().props.onClick({})
+await settleAll(2)
+styleOption('简洁扁平').props.onClick({})
+await settleAll(4)
+eq('flat is restored after the palette round trip', (await api('settings')).values.appearance, 'flat')
 styleButton().props.onClick({})
 await settleAll(2)
 document.key(null, { key: 'Escape' })
@@ -3342,6 +3363,29 @@ section('visual system v2 (computed, not rendered)')
     ok('the style picker lays out three choices and previews the playful sample',
       /\.td-style-options\{[^}]*grid-template-columns:repeat\(3,/.test(rules)
       && /\.td-style-mini\.td-style-mini-playful\{[^}]*--mini-accent:#58cc02/.test(rules))
+    // The four 方案 C palettes: token-only, text-safe fills, one shared geometry.
+    const PALETTES = {
+      c1: { canvas: '#fdfbff', cta: '#5f55d8', dark: '#a99bff', ink: '#2c2440' },
+      c2: { canvas: '#fff9fb', cta: '#be4470', dark: '#ff9db8', ink: '#3a2530' },
+      c3: { canvas: '#fbfffd', cta: '#1f7a64', dark: '#71d2b9', ink: '#1f3a33' },
+      c4: { canvas: '#fffbf8', cta: '#b2552f', dark: '#ffb394', ink: '#3b2a23' },
+    }
+    for (const [id, tokens] of Object.entries(PALETTES)) {
+      const light = bodyOf(`.td-seat[data-todo-appearance="${id}"]`) ?? ''
+      const dark = bodyOf(`body[data-ds-dark-theme] .td-seat[data-todo-appearance="${id}"]`) ?? ''
+      ok(`the ${id} palette repaints with its own text-safe fill and canvas`,
+        light.includes(`--td-accent:${tokens.cta}`) && light.includes('--td-accent-on:#fff')
+        && light.includes(`--td-canvas:${tokens.canvas}`))
+      ok(`the ${id} palette keeps the shared radius ladder and its brand-hued shadows`,
+        /--td-r-xl:22px;--td-r-lg:18px;--td-r-md:14px;--td-r-sm:11px/.test(light)
+        && /--td-sh-2:[^;}]*rgba\(/.test(light))
+      ok(`the ${id} palette inverts to its brand-3 tint in the dark theme`,
+        dark.includes(`--td-accent:${tokens.dark}`) && dark.includes(`--td-accent-on:${tokens.ink}`))
+      ok(`the ${id} palette swatch previews its own colours`,
+        new RegExp(`\\.td-style-mini\\.td-style-mini-${id}\\{[^}]*--mini-accent:${tokens.cta}`).test(rules))
+    }
+    ok('the palette band lays the four swatches out as one row',
+      /\.td-style-palettes\{[^}]*grid-template-columns:repeat\(4,/.test(rules))
     ok('the floating frame uses the shared hairline, radius and shadow',
       /\.td-float\{[^}]*border:1px solid var\(--td-line-2\)[^}]*border-radius:var\(--td-r-lg\)[^}]*box-shadow:var\(--td-sh-2\)/.test(rules))
     ok('the floating frame does not pin a third token palette',
@@ -3421,8 +3465,9 @@ const inputFor = (label) => ui.byClass('td-set-input').find((n) => n.props['aria
 const boxFor = (label) => ui.byClass('td-set-check').find((n) => n.props['aria-label'] === label)
 ok('the plugin settings page exposes the appearance preference', inputFor('界面风格')?.tag === 'select')
 eq('the settings form starts with the saved flat theme', inputFor('界面风格')?.props.value, 'flat')
-eq('all three theme names are human-readable in the form',
-  inputFor('界面风格')?.children.map((option) => ui.text(option)), ['简洁扁平', '杂志编辑', '活力闯关'])
+eq('all seven theme names are human-readable in the form',
+  inputFor('界面风格')?.children.map((option) => ui.text(option)),
+  ['简洁扁平', '杂志编辑', '活力闯关', '藕粉雾蓝', '樱花奶油', '薄荷奶霜', '蜜桃乌龙'])
 ok('the App ID input exists', inputFor('App ID') !== undefined)
 ok('the app_token input exists', inputFor('多维表格 app_token') !== undefined)
 eq('the secret renders as a password field', inputFor('App Secret').props.type, 'password')

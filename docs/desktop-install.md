@@ -39,7 +39,7 @@ error: profile "desktop" is managed exclusively by the Electron application
 
 1. 打开桌面版 → **设置 → 插件**（市场 / 插件管理器）。
 2. 添加插件，来源填其一：
-   - `github:vonvonyung/dsh-task-todo#v0.4.28`（固定到当前 GitHub Release；桌面 profile 已有 `github:` 依赖，这种规范它认）；
+   - `github:vonvonyung/dsh-task-todo#v0.4.29`（固定到当前 GitHub Release；桌面 profile 已有 `github:` 依赖，这种规范它认）；
    - `github:vonvonyung/dsh-task-todo`（跟随仓库默认分支）；
    - 本地目录的绝对路径（开发形态）；
    - 本地产出的 `dsh-task-todo-<版本>.tgz`（`npm pack` 的结果，profile 里也有 `file:` 先例）。
@@ -49,7 +49,7 @@ error: profile "desktop" is managed exclusively by the Electron application
 安装完成后 `<DSH_PROFILE_DIR>\package.json` 里应有两处变化，这也是「到底装上了没」的判据
 （重启前就能查）：
 
-- `dependencies` 增加一条，如 `"dsh-task-todo": "github:vonvonyung/dsh-task-todo#v0.4.28"`；
+- `dependencies` 增加一条，如 `"dsh-task-todo": "github:vonvonyung/dsh-task-todo#v0.4.29"`；
 - `dsh.profile.bundles` 数组增加一项 `"dsh-task-todo"`。
 
 ## 验证

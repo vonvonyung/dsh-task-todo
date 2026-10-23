@@ -164,7 +164,10 @@ const topRules = []
   }
 }
 ok('the sheet parses into top-level rules', topRules.length > 100, topRules.length)
-const APPEARANCE_ROOT = /^(?:body\[data-ds-dark-theme\]\s+)?\.td-seat\[data-todo-appearance="(flat|editorial|playful)"\]$/
+// The palette ids join the three structural styles here: every one of them owns a
+// literal token map, and this list is what makes the orphan-token sweep below read
+// those maps as writers instead of reporting their tokens as undeclared.
+const APPEARANCE_ROOT = /^(?:body\[data-ds-dark-theme\]\s+)?\.td-seat\[data-todo-appearance="(flat|editorial|playful|c1|c2|c3|c4)"\]$/
 const appearanceRootRules = topRules.filter(({ head }) => APPEARANCE_ROOT.test(head))
 const playfulThemeMaps = appearanceRootRules.filter(({ head }) => head.includes('data-todo-appearance="playful"'))
 ok('the playful palette has separately scoped light and dark token maps',
@@ -218,8 +221,13 @@ const LITERAL_COLOURS = new Set([
   '#fffaf1', '#f6eedd', '#3b82f6', '#145df0', '#496f89', '#b85e53', '#568b83',
   '#fff', '#16233a', '#4d6076',
 ])
-const appearancePaletteBlocks = /(?:body\[data-ds-dark-theme\]\s+)?\.td-seat\[data-todo-appearance="playful"\]\s*\{[^{}]*\}/g
-const playfulPreviewPaletteBlocks = /(?:body\[data-ds-dark-theme\]\s+)?\.td-style-mini\.td-style-mini-playful\s*\{[^{}]*\}/g
+// Playful and the four 方案 C palettes are the appearances that own literal colour
+// maps; their preview swatches do too, because a swatch has to paint ITS palette
+// even while another theme is selected. Everywhere else the alias map still rules.
+const appearancePaletteBlocks = /(?:body\[data-ds-dark-theme\]\s+)?\.td-seat\[data-todo-appearance="(?:playful|c1|c2|c3|c4)"\]\s*\{[^{}]*\}/g
+// Any `.td-style-mini…` rule, not just the playful one: the palette swatches use
+// the same markup and the same local tokens.
+const playfulPreviewPaletteBlocks = /(?:body\[data-ds-dark-theme\]\s+)?\.td-style-mini[^{}]*\{[^{}]*\}/g
 const literalCheckSheet = cssRules.replace(appearancePaletteBlocks, ' ').replace(playfulPreviewPaletteBlocks, ' ')
 const literals = [...new Set((literalCheckSheet.match(/#[0-9a-fA-F]{3,8}\b/g) ?? []).map((c) => c.toLowerCase()))]
 const stray = literals.filter((c) => !LITERAL_COLOURS.has(c)).sort()
