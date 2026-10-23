@@ -659,6 +659,7 @@ const testWindow = {
 }
 const uiFeishuMock = {
   enabled: false, enableEntry: false, busyReplies: 0, syncCalls: [], applyCalls: [], entryCalls: [], resolveCalls: [],
+  resolveAllCalls: [], resolveAllReply: null,
   conflicts: [], syncPreview: null, syncActual: null, applyPreview: null, applyActual: null,
 }
 const nativeFetch = globalThis.fetch
@@ -703,6 +704,25 @@ async function browserFetch(url, init) {
     if (payload?.data?.settings?.feishu) payload.data.settings.feishu.enabled = true
     uiFeishuMock.conflicts = []
     return respond({ resolved: true, key: args.key, field: args.field, operation: args.operation, direction: args.direction, state: payload.data })
+  }
+  if (uiFeishuMock.enabled && pathname === '/todo/api/feishuResolveAllConflicts') {
+    const args = JSON.parse(init?.body ?? '{}')
+    uiFeishuMock.resolveAllCalls.push(args)
+    const response = await nativeFetch(`${BASE}/todo/api/state`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(args),
+    })
+    const payload = await response.json()
+    if (payload?.data?.settings?.feishu) payload.data.settings.feishu.enabled = true
+    uiFeishuMock.conflicts = []
+    return respond({
+      ...(uiFeishuMock.resolveAllReply ?? {}),
+      direction: args.direction, ok: true, stale: false,
+      conflicts: 1, total: 1, resolved: 1, remaining: 0,
+      updated: args.direction === 'remote' ? 1 : 0, updatedFields: args.direction === 'remote' ? 1 : 0,
+      pushed: args.direction === 'local' ? 1 : 0, created: 0, removed: 0, restored: 0,
+      failed: [], at: '2026-10-15T00:00:00.000Z',
+      state: payload.data,
+    })
   }
   if (uiFeishuMock.enabled && pathname === '/todo/api/syncFeishu') {
     const args = JSON.parse(init?.body ?? '{}')
@@ -1132,6 +1152,37 @@ await ui.settle()
 ok('the task view retries after a busy response and clears the busy state',
   uiFeishuMock.entryCalls.length === entryCallsBeforeBusy + 2
   && !overlay.text().includes('正在后台检查飞书'), uiFeishuMock.entryCalls.length - entryCallsBeforeBusy)
+// 「全部采用飞书 / 全部保留本地」: with conflicts pending, the dialog offers the
+// bulk answers next to the per-field ones, and asks once more inline before it
+// writes -- the same two directions, applied to every displayed conflict.
+const bulkChoice = (label) => overlay.byClass('td-feishu-bulk').flatMap((node) => node.children)
+  .find((node) => typeof node !== 'string' && node.tag === 'button' && overlay.text(node) === label)
+ok('the conflict dialog offers a bulk keep-local answer', bulkChoice('全部保留本地') !== undefined,
+  overlay.byClass('td-feishu-bulk').length)
+ok('the conflict dialog offers a bulk adopt-Feishu answer', bulkChoice('全部采用飞书') !== undefined)
+const bulkBeforeConflict = overlay.byClass('td-feishu-conflict').length
+bulkChoice('全部采用飞书')?.props.onClick({})
+await ui.settle()
+ok('a bulk direction asks for confirmation before writing',
+  bulkChoice('确认采用飞书') !== undefined && uiFeishuMock.resolveAllCalls.length === 0,
+  uiFeishuMock.resolveAllCalls)
+ok('the confirmation says how many items will move',
+  overlay.byClass('td-feishu-bulk').some((node) => /确认全部采用飞书？\s*\d+ 项/.test(overlay.text(node))),
+  overlay.byClass('td-feishu-bulk').map((node) => overlay.text(node)))
+bulkChoice('确认采用飞书')?.props.onClick({})
+await ui.settle(3)
+eq('the confirmed bulk choice reaches the host with the Feishu direction',
+  uiFeishuMock.resolveAllCalls.at(-1)?.direction, 'remote')
+ok('the bulk call carries the displayed conflicts so a stale dialog cannot write',
+  Array.isArray(uiFeishuMock.resolveAllCalls.at(-1)?.conflicts)
+  && uiFeishuMock.resolveAllCalls.at(-1).conflicts.length === 1
+  && uiFeishuMock.resolveAllCalls.at(-1).conflicts[0].changes[0].field === '更新时间',
+  uiFeishuMock.resolveAllCalls.at(-1)?.conflicts)
+eq('the bulk answer resolves every pending conflict at once',
+  overlay.byClass('td-feishu-conflict').length, 0)
+ok('the dialog still reports the outcome of the bulk pass',
+  overlay.text().includes('目前没有待处理的冲突'), overlay.text().slice(-160))
+ok('the bulk pass had conflicts to work on before it ran', bulkBeforeConflict > 0, bulkBeforeConflict)
 const closeFeishuDialog = syncDialogButtons()
   .find((node) => node.props['aria-label'] === '关闭')
 closeFeishuDialog?.props.onClick({})
@@ -3379,6 +3430,34 @@ eq('a saved secret is signalled by the placeholder before anything is stored',
   inputFor('App Secret').props.placeholder, '')
 ok('the sync buttons exist unclicked',
   ui.byClass('td-set-btn').some((n) => ui.text(n).includes('立即同步')))
+// The footer is arranged by the direction of the work, not as one flat run of
+// eleven buttons: the form actions keep their own row, and the Feishu toolbox
+// is grouped as 连接与检查 / 本地 → 飞书 / 飞书 → 本地.
+const settingsFooter = ui.byClass('td-set-footer')
+eq('the settings footer exists exactly once', settingsFooter.length, 1)
+const footerHead = ui.byClass('td-set-footerhead')
+eq('save and reload own a separate footer row', footerHead.length, 1)
+ok('the form actions stay out of the Feishu groups',
+  ['保存', '重新载入'].every((label) => footerHead[0].children
+    .some((node) => typeof node !== 'string' && node.tag === 'button' && ui.text(node) === label)))
+const syncGroups = ui.byClass('td-set-syncgroup')
+eq('the Feishu toolbox is split into three direction groups', syncGroups.length, 3)
+eq('the groups are labelled by direction', ui.byClass('td-set-synctitle').map((node) => ui.text(node)),
+  ['连接与检查', '本地 → 飞书', '飞书 → 本地'])
+const groupLabels = (index) => {
+  const labels = []
+  const walk = (node) => {
+    if (node === null || node === undefined || typeof node === 'string') return
+    if (node.tag === 'button') { labels.push(ui.text(node)); return }
+    for (const child of node.children ?? []) walk(child)
+  }
+  walk(syncGroups[index])
+  return labels
+}
+eq('the check group holds the read-only diagnostics', groupLabels(0), ['测试连接', '补全字段', '完整对账'])
+eq('the push group holds the local-to-Feishu actions', groupLabels(1), ['预览同步', '立即同步'])
+eq('the pull group holds the Feishu-to-local actions', groupLabels(2),
+  ['从飞书更新本地（预览）', '从飞书补洞（预览）', '从飞书补洞'])
 // The Feishu action row, in the order the work is actually done. These are the
 // buttons a user clicks BEFORE anything is configured, so their absence -- or a
 // crash on click -- is the entire first-run experience.
@@ -3521,6 +3600,36 @@ eq('the confirmation request includes the preview token', uiFeishuMock.applyCall
 eq('confirmed import ends with a completion report', ui.text().includes('已更新 1 项'), true)
 ok('the confirmation leaves a persistent completion message near the settings header',
   ui.byClass('td-set-banner').some((node) => ui.text(node).includes('已更新 1 项')),
+  ui.text().slice(0, 360))
+
+// 「从飞书更新本地」 is the same three-way merge the entry check runs, so a
+// two-sided difference is reported as a direction question here too -- and the
+// page offers the same one-click answers as the conflict dialog.
+uiFeishuMock.applyPreview = {
+  keyField: '任务ID', remote: 1, matched: 1, differing: 1, planned: 0,
+  updated: 0, updatedFields: 0, items: [{ key: 't_ui_conflict', title: '界面测试', changes: [
+    { field: '标题', local: '本地标题', remote: '飞书标题', applied: false, reason: '本地和飞书都修改了这个字段', conflict: true },
+  ] }],
+  conflicts: [{ key: 't_ui_conflict', title: '界面测试', changes: [
+    { field: '标题', local: '本地标题', remote: '飞书标题', applied: false, reason: '本地和飞书都修改了这个字段', conflict: true },
+  ] }],
+  skipped: [], notApplied: ['标题'], missingColumns: [], createdLists: [],
+  dryRun: true, previewToken: 'conflict-preview-token',
+}
+await press('从飞书更新本地（预览）')
+ok('a conflict-only reverse-import preview still offers a direction choice',
+  ui.byClass('td-set-btn').some((node) => ui.text(node) === '全部采用飞书')
+  && ui.byClass('td-set-btn').some((node) => ui.text(node) === '全部保留本地'),
+  ui.byClass('td-set-btn').map((node) => ui.text(node)))
+ok('the reverse-import report explains the direction question',
+  ui.text().includes('无法自动判断方向'), ui.text().slice(-500))
+ok('a conflict-only preview does not pretend there is something to apply',
+  ui.byClass('td-set-btn').every((node) => ui.text(node) !== '确认应用以上预览'))
+await press('全部采用飞书')
+eq('the settings bulk action calls the shared resolver with the Feishu direction',
+  uiFeishuMock.resolveAllCalls.at(-1)?.direction, 'remote')
+ok('the settings page reports what the bulk pass did',
+  ui.byClass('td-set-banner').some((node) => ui.text(node).includes('全部采用飞书：已处理 1 项')),
   ui.text().slice(0, 360))
 
 uiFeishuMock.syncActual = {

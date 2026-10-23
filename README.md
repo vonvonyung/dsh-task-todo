@@ -35,7 +35,7 @@
 | 清单管理 | 左栏每行一个清单：点齿轮（或选中该行后点）打开居中弹窗，可**改名 / 换颜色 / 上移下移 / 删除**；也能直接拖拽换位置。颜色是 8 个预设色，点一下即生效 |
 | 新建清单 | 左栏「清单」分组里直接输入名字回车即建，输入框前的圆点就是它将要得到的颜色（宿主决定的，不是猜的） |
 | 数据与备份 | 左侧栏「数据」分组可导出月度计划表、导出备份、导入恢复或复制数据路径 |
-| 飞书多维表格同步 | 把任务镜像到飞书 Bitable；按「任务ID」匹配，重复执行幂等。字段级对账展示两侧值；共同基准保护飞书端修改，冲突需选择覆盖、反向更新或跳过。支持先预览、确认后将可还原字段更新到本地，同时保留「从飞书补洞」只新增的语义。详见 [docs/feishu-sync.md](docs/feishu-sync.md) |
+| 飞书多维表格同步 | 把任务镜像到飞书 Bitable；按「任务ID」匹配，重复执行幂等。字段级对账展示两侧值；共同基准保护飞书端修改，冲突可逐字段选择，也可一键「全部采用飞书」/「全部保留本地」。支持先预览、确认后将可还原字段更新到本地（与进入待办时的自动协调同一套三方合并规则），同时保留「从飞书补洞」只新增的语义。详见 [docs/feishu-sync.md](docs/feishu-sync.md) |
 | 全屏 | 覆盖整个框架的全屏模式（Esc 退出，再点入口也可收起），切换不丢当前视图与筛选 |
 | 侧边栏徽标 | 入口图标右上角显示待办数（口径可在设置里切换：今天 / 逾期 / 未完成） |
 | 与 agent 协作 | 10 个工具 + `/todo` 斜杠命令 + 随包分发的技能，天然可对话操作 |
@@ -88,7 +88,7 @@
 
 #### 界面风格（v0.4.23）
 
-面板标题右侧的「界面风格设置」可以即时切换，三种风格都会自动保存在本机；也可以在「设置 → 待办任务」里编辑。默认是「简洁扁平」。版本号按 `x.y.zz` 递增，本版为 `0.4.27`。
+面板标题右侧的「界面风格设置」可以即时切换，三种风格都会自动保存在本机；也可以在「设置 → 待办任务」里编辑。默认是「简洁扁平」。版本号按 `x.y.zz` 递增，本版为 `0.4.28`。
 
 - **简洁扁平**：黑白与中性灰打底，鲜明蓝 `#145df0` 用于主操作、选中与聚焦；压低圆角、减掉阴影，侧栏选中项不再加左边框。沿用现有任务布局。
 - **杂志编辑**：深色侧栏、蓝灰强调色 `#496f89`、衬线标题与细分隔线；保留编辑式层级，但不加装饰性大标题或统计展板，常用视图、搜索和任务操作仍在手边。
@@ -114,7 +114,7 @@ error: profile "desktop" is managed exclusively by the Electron application
 ```
 
 所以请在**桌面版应用内**安装：设置 → 插件（市场）→ 添加插件，填
-`github:vonvonyung/dsh-task-todo#v0.4.27`（固定到本次发布）；也可以指向本地目录或本地产出的 `.tgz`。
+`github:vonvonyung/dsh-task-todo#v0.4.28`（固定到本次发布）；也可以指向本地目录或本地产出的 `.tgz`。
 装完**完全退出并重启桌面版**（bundle 层只在启动时读取；桌面版用自己的窗口加载客户端
 bundle，不需要像浏览器那样 `Ctrl+F5`）。卸载同样在应用内的插件管理器里做。
 
@@ -124,7 +124,7 @@ bundle，不需要像浏览器那样 `Ctrl+F5`）。卸载同样在应用内的�
 
 ```sh
 # 安装本次 GitHub Release（固定版本）
-dsh plugin --profile web add "github:vonvonyung/dsh-task-todo#v0.4.27"
+dsh plugin --profile web add "github:vonvonyung/dsh-task-todo#v0.4.28"
 
 # 从 npm 安装（npm 包发布后可用；目前尚未发布到 npm）
 dsh plugin --profile web add dsh-task-todo
@@ -198,7 +198,7 @@ settings.json），所以无界面的 headless 部署也能配：settings.json �
    原样给出飞书的 `code` / `message`，并指出卡在哪一步）。
 4. 表格还是空的？点「**补全字段**」：按表头清单把缺的列一次建好（全部「文本」类型，已有列不删不改）。
    列名清单见 [docs/feishu-sync.md](docs/feishu-sync.md)。
-5. 把「启用飞书同步」打开 → 点「**预览同步**」。无冲突时点「立即同步」执行；如发现飞书侧修改，先在报告中查看本地 / 飞书值，再选按本地覆盖、按飞书更新本地或跳过。想让任务变动自动同步，再把「自动同步」打开（防抖 3 秒；冲突任务跳过并报告）。
+5. 把「启用飞书同步」打开 → 点「**预览同步**」。无冲突时点「立即同步」执行；如发现飞书侧修改，先在报告中查看本地 / 飞书值，再选按本地覆盖、按飞书更新本地或跳过。想让任务变动自动同步，再把「自动同步」打开（防抖 3 秒；冲突任务跳过并报告）。设置页底部的按钮按方向分成三组：连接与检查、本地 → 飞书、飞书 → 本地。
 
 启用且配置完成后，每次进入「待办任务」或恢复联网时都会后台检查并合并一次；这项进入检查独立于「自动同步」开关。它只补入本地缺失任务、应用飞书单侧字段变化、推送安全的本地单侧变化；双侧冲突保留双方值并在待办顶部逐字段选择。自动同步仍默认关闭。
 
@@ -211,7 +211,8 @@ settings.json），所以无界面的 headless 部署也能配：settings.json �
 | 预览同步 | 只读预览新增 / 更新 / 删除与冲突，不写远端 |
 | 立即同步 | 本地 → 飞书（新增 / 更新；有冲突先要求选择；**默认不删除任何远端行**） |
 | 完整对账 | 只读逐行比对：一致 / 有差异（列出字段、本地值、飞书值与变化方向）/ 各自独有 |
-| 从飞书更新本地（预览） | 查看本地已有、ID 匹配任务的可还原字段差异；确认令牌确保预览后未变化 |
+| 从飞书更新本地（预览） | 查看本地已有、ID 匹配任务的可还原字段差异；两端都改过的字段列为待选择；确认令牌确保预览后未变化 |
+| 全部采用飞书 / 全部保留本地 | 把当前所有待选冲突一次性按同一方向处理；与待办页冲突对话框里的同名按钮、`resolveAll` 工具动作是同一个实现 |
 | 从飞书补洞（预览） | 看看远端有哪些本地没有的行 |
 | 从飞书补洞 | 把这些行**只增不改**地导进本地 |
 
@@ -232,7 +233,7 @@ settings.json），所以无界面的 headless 部署也能配：settings.json �
 /todo sync           # 真正同步
 ```
 
-Agent 侧可调用 `task_sync_feishu`：`action=status|test|fields|reconcile|pull|applyRemote|sync`（可带 `dryRun` / `prune` / `conflictPolicy`）。`applyRemote` 先 dry-run，再将返回的 `previewToken` 用于确认。
+Agent 侧可调用 `task_sync_feishu`：`action=status|test|fields|reconcile|pull|applyRemote|resolveAll|sync`（可带 `dryRun` / `prune` / `conflictPolicy` / `direction`）。`applyRemote` 先 dry-run，再将返回的 `previewToken` 用于确认；`resolveAll` 配 `direction=local|remote` 一次处理所有待选冲突。
 按「任务ID」匹配，所以**重复执行是幂等的**；远端那些不带 `任务ID` 的行（别人手写的）不会被删。
 表里已经有数据又没有 `任务ID` 列时，同步会**拒绝执行**而不是复制一份。
 
@@ -272,7 +273,7 @@ Agent 侧可调用 `task_sync_feishu`：`action=status|test|fields|reconcile|pul
 | `task_restore` | `id` `source`(trash/archive) | 从回收站或归档恢复任务及其子任务 |
 | `task_purge` | `id` | 永久清除回收站中的任务及其回收站子任务 |
 | `list_manage` | `action`(list/create/update/move/delete) `id`(或唯一清单名) `name` `newName` `color` `index` `delta` | 清单（或清单列表）+ 文本摘要 |
-| `task_sync_feishu` | `action`(status/test/fields/reconcile/pull/applyRemote/sync) `dryRun` `prune` `conflictPolicy` `previewToken` | 飞书同步状态；只读连接测试；补列结果；字段级对账；只新增补洞；反向更新预览/确认；或带冲突策略的同步 |
+| `task_sync_feishu` | `action`(status/test/fields/reconcile/pull/applyRemote/resolveAll/sync) `dryRun` `prune` `conflictPolicy` `previewToken` `direction` | 飞书同步状态；只读连接测试；补列结果；字段级对账；只新增补洞；反向更新预览/确认；一次性处理全部冲突；或带冲突策略的同步 |
 
 `id` 也接受唯一标题；标题不唯一时会拒绝并返回候选，不会替你猜。清单同理：`list_manage`
 接受唯一的清单名，删除只删分组、任务移到「收集箱」，系统清单「收集箱」删不掉。
@@ -290,7 +291,8 @@ Agent 侧可调用 `task_sync_feishu`：`action=status|test|fields|reconcile|pul
 | `/todo sync 测试` | 只读探测连接（凭证 / 列 / 行数） |
 | `/todo sync 字段` | 给表格补上缺的列 |
 | `/todo sync 对账` | 完整对账（字段级列出本地值 / 飞书值，只读） |
-| `/todo sync 更新本地预览` / `确认更新本地` | 预览后显式应用可还原的飞书变更 |
+| `/todo sync 更新本地预览` / `确认更新本地` | 预览后显式应用可还原的飞书变更（两端都改过的字段留给选择） |
+| `/todo sync 全部采用飞书` / `全部保留本地` | 一次处理所有待选冲突 |
 | `/todo sync 按本地覆盖` / `跳过冲突` | 明确处理同步冲突 |
 | `/todo sync 补洞[预览]` | 从飞书补洞：只导入本地没有的行 |
 | `/todo sync 预览` | 同步的 dry run |
