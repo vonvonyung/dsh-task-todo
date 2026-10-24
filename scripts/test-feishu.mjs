@@ -698,6 +698,128 @@ eq('a second reconciliation clears the resolved conflict',
   (await entrySvc.feishuEntrySync({ today: T })).conflicts.some((conflict) => conflict.key === entryConflictTask.id), false)
 gate('second entry conflict is JSON-safe', secondEntryResult)
 
+console.log('--- bulk conflict decisions: 全部采用飞书 / 全部保留本地 ---')
+// Two tasks, two conflicting fields each? No: one task with two fields and a
+// second task with one, so the bulk pass has to cover a UNION of keys and
+// fields rather than one task at a time.
+const bulkServer = makeFeishuServer({ fields: requiredColumns('任务ID') })
+const bulkSvc = new TodoService(null, () => {}, {
+  fetch: bulkServer.fetch, settingsFile: path.join(dir, 'bulk-settings.json'),
+})
+bulkSvc.applySettings({
+  dataFile: path.join(dir, 'bulk.json'),
+  feishu: { enabled: true, appId: 'a', appSecret: 'b', appToken: 'c', tableId: 'd', autoSync: false },
+})
+const bulkStore = bulkSvc.require()
+const bulkFirst = bulkStore.create({ id: 't_bulk_first', title: '批量一（原）', note: '备注一（原）' })
+const bulkSecond = bulkStore.create({ id: 't_bulk_second', title: '批量二（原）' })
+await bulkSvc.syncFeishu({ today: T })
+const bulkRecord = (id) => [...bulkServer.state.records.entries()].find(([, fields]) => fields['任务ID'] === id)
+// Both sides change: every one of these is a direction question, never a value
+// the planner may pick on its own.
+bulkStore.update(bulkFirst.id, { title: '批量一（本地）', note: '备注一（本地）' })
+bulkStore.update(bulkSecond.id, { title: '批量二（本地）' })
+bulkRecord(bulkFirst.id)[1]['标题'] = '批量一（飞书）'
+bulkRecord(bulkFirst.id)[1]['备注'] = '备注一（飞书）'
+bulkRecord(bulkSecond.id)[1]['标题'] = '批量二（飞书）'
+const bulkEntry = await bulkSvc.feishuEntrySync({ today: T })
+eq('the entry check holds every two-sided field as a conflict',
+  bulkEntry.conflicts.map((conflict) => [conflict.key, conflict.changes.map((change) => change.field).sort()])
+    .sort((a, b) => String(a[0]).localeCompare(String(b[0]))),
+  [[bulkFirst.id, ['备注', '标题']], [bulkSecond.id, ['标题']]])
+let bulkBadDirection = null
+try { await bulkSvc.resolveAllFeishuConflicts({ direction: 'newest' }) } catch (e) { bulkBadDirection = e }
+ok('the bulk action refuses an unknown direction', bulkBadDirection !== null
+  && String(bulkBadDirection.message).includes('local 或 remote'), bulkBadDirection?.message)
+// A UI caller names exactly what it showed. When that snapshot no longer
+// matches (here: one value is stale), nothing is written and the caller is told
+// to re-check -- the bulk button must never act on values the user did not see.
+const shownConflicts = bulkEntry.conflicts.map((conflict) => ({
+  key: conflict.key,
+  operation: conflict.operation ?? 'field',
+  title: conflict.title,
+  changes: conflict.changes.map((change) => ({ field: change.field, local: change.local, remote: change.remote })),
+}))
+const driftedConflicts = shownConflicts.map((item) => ({
+  ...item,
+  changes: item.changes.map((change) => ({ ...change, remote: `${change.remote}（旧）` })),
+}))
+const bulkDrifted = await bulkSvc.resolveAllFeishuConflicts({ direction: 'remote', conflicts: driftedConflicts, today: T })
+eq('a stale displayed snapshot is refused instead of applied',
+  [bulkDrifted.stale, bulkDrifted.resolved, bulkDrifted.failed.length], [true, 0, 3])
+eq('and neither side was touched',
+  [bulkStore.get(bulkFirst.id)?.title, bulkRecord(bulkFirst.id)[1]['标题']],
+  ['批量一（本地）', '批量一（飞书）'])
+const bulkRemote = await bulkSvc.resolveAllFeishuConflicts({
+  direction: 'remote', conflicts: shownConflicts, today: T,
+})
+eq('「全部采用飞书」 applies every displayed field locally',
+  [bulkStore.get(bulkFirst.id)?.title, bulkStore.get(bulkFirst.id)?.note, bulkStore.get(bulkSecond.id)?.title],
+  ['批量一（飞书）', '备注一（飞书）', '批量二（飞书）'])
+eq('and accounts for each one', [bulkRemote.total, bulkRemote.resolved, bulkRemote.failed.length], [3, 3, 0])
+gate('the bulk Feishu-side result is lossless JSON', bulkRemote)
+eq('a fresh entry check has nothing left to ask about',
+  (await bulkSvc.feishuEntrySync({ today: T })).conflicts, [])
+// The other direction, on a fresh pair of two-sided edits.
+bulkStore.update(bulkFirst.id, { title: '批量一（本地二）' })
+bulkStore.update(bulkSecond.id, { title: '批量二（本地二）' })
+bulkRecord(bulkFirst.id)[1]['标题'] = '批量一（飞书二）'
+bulkRecord(bulkSecond.id)[1]['标题'] = '批量二（飞书二）'
+await bulkSvc.feishuEntrySync({ today: T })
+const bulkLocal = await bulkSvc.resolveAllFeishuConflicts({ direction: 'local', today: T })
+eq('「全部保留本地」 writes every local value to the table',
+  [bulkRecord(bulkFirst.id)[1]['标题'], bulkRecord(bulkSecond.id)[1]['标题']],
+  ['批量一（本地二）', '批量二（本地二）'])
+eq('and leaves the local values untouched',
+  [bulkStore.get(bulkFirst.id)?.title, bulkStore.get(bulkSecond.id)?.title],
+  ['批量一（本地二）', '批量二（本地二）'])
+eq('the local direction reports what it pushed', [bulkLocal.total, bulkLocal.resolved, bulkLocal.pushed], [2, 2, 2])
+gate('the bulk local-side result is lossless JSON', bulkLocal)
+eq('the conflict list is empty afterwards', (await bulkSvc.feishuEntrySync({ today: T })).conflicts, [])
+
+console.log('--- reverse import is conflict-aware by default ---')
+// 「从飞书更新本地」 must not be a blind overwrite: a field only the local side
+// changed is left for the push pass, and a field both sides changed is reported
+// as a conflict instead of being imported.
+const reverseServer = makeFeishuServer({ fields: requiredColumns('任务ID') })
+const reverseSvc = new TodoService(null, () => {}, {
+  fetch: reverseServer.fetch, settingsFile: path.join(dir, 'reverse-settings.json'),
+})
+reverseSvc.applySettings({
+  dataFile: path.join(dir, 'reverse.json'),
+  feishu: { enabled: true, appId: 'a', appSecret: 'b', appToken: 'c', tableId: 'd', autoSync: false },
+})
+const reverseStore = reverseSvc.require()
+const reverseRemoteOnly = reverseStore.create({ id: 't_rev_remote', title: '远端单侧（原）' })
+const reverseLocalOnly = reverseStore.create({ id: 't_rev_local', title: '本地单侧（原）', note: '原备注' })
+const reverseBoth = reverseStore.create({ id: 't_rev_both', title: '两端（原）' })
+await reverseSvc.syncFeishu({ today: T })
+const reverseRecord = (id) => [...reverseServer.state.records.entries()].find(([, fields]) => fields['任务ID'] === id)
+reverseRecord(reverseRemoteOnly.id)[1]['标题'] = '远端单侧（飞书）'
+reverseStore.update(reverseLocalOnly.id, { note: '本地新备注' })
+reverseStore.update(reverseBoth.id, { title: '两端（本地）' })
+reverseRecord(reverseBoth.id)[1]['标题'] = '两端（飞书）'
+const reversePreview = await reverseSvc.applyFeishuRemote({ dryRun: true })
+eq('the preview applies the single-sided Feishu edit', reversePreview.planned, 1)
+eq('both-sided edits are reported as conflicts, not planned',
+  reversePreview.conflicts.map((item) => [item.key, item.changes.map((change) => change.field)]),
+  [[reverseBoth.id, ['标题']]])
+eq('the local-only edit is neither imported nor listed as a conflict',
+  reversePreview.items.some((item) => item.key === reverseLocalOnly.id), false)
+const reverseApplied = await reverseSvc.applyFeishuRemote({ previewToken: reversePreview.previewToken })
+eq('confirming imports only the safe Feishu-side value',
+  [reverseStore.get(reverseRemoteOnly.id)?.title, reverseStore.get(reverseBoth.id)?.title],
+  ['远端单侧（飞书）', '两端（本地）'])
+eq('the local-only note survives the reverse import',
+  reverseStore.get(reverseLocalOnly.id)?.note, '本地新备注')
+eq('the conflict is still waiting for a direction',
+  (reverseApplied.conflicts ?? []).map((item) => item.key), [reverseBoth.id])
+gate('the conflict-aware reverse-import result is lossless JSON', reverseApplied)
+const reverseBulk = await reverseSvc.resolveAllFeishuConflicts({ direction: 'remote', today: T })
+eq('the settings-side bulk answer resolves the remaining conflict',
+  [reverseBulk.ok, reverseBulk.failed.length, reverseStore.get(reverseBoth.id)?.title],
+  [true, 0, '两端（飞书）'])
+
 // The mirrored update timestamp is not auto-importable, but an intentional
 // Feishu-side edit may be accepted through the explicit field chooser.
 const timestampTask = entryStore.create({ id: 't_entry_timestamp', title: '更新时间冲突' })

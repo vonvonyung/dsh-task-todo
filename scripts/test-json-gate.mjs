@@ -625,8 +625,14 @@ const interfaceTask = await call('task_add', { title: 'Agent 与命令同步目�
 const initialAgentSync = await call('task_sync_feishu', { action: 'sync' })
 gate('task_sync_feishu action=sync with a configured fake table', initialAgentSync)
 ok('the initial Agent sync establishes the remote row', initialAgentSync.summary.created >= 1, initialAgentSync.summary)
-const interfaceRecord = [...feishuRows.entries()].find(([, fields]) => fields['任务ID'] === interfaceTask.created.id)
-interfaceRecord[1][FEISHU_FIELDS.title] = '飞书端 Agent 值'
+// The fake table REPLACES a row object on write, so a captured tuple goes stale
+// the moment anything is pushed. Every edit below re-reads the current row.
+const currentInterfaceRecord = () => [...feishuRows.entries()].find(([, fields]) => fields['任务ID'] === interfaceTask.created.id)
+const setInterfaceRemoteTitle = (value) => { currentInterfaceRecord()[1][FEISHU_FIELDS.title] = value }
+const interfaceLocalTitle = async () => (await call('task_list', { filter: 'all' })).tasks
+  .find((task) => task.id === interfaceTask.created.id)?.title
+const interfaceRemoteTitle = () => currentInterfaceRecord()[1][FEISHU_FIELDS.title]
+setInterfaceRemoteTitle('飞书端 Agent 值')
 await call('task_update', { id: interfaceTask.created.id, title: '本地端 Agent 值' })
 const conflictedAgentSync = await call('task_sync_feishu', { action: 'sync', dryRun: true })
 gate('task_sync_feishu conflict preview is lossless JSON', conflictedAgentSync)
@@ -646,23 +652,48 @@ const agentApplied = await call('task_sync_feishu', {
   action: 'applyRemote', previewToken: agentPreview.result.previewToken,
 })
 gate('task_sync_feishu action=applyRemote confirmation', agentApplied)
-ok('the Agent confirmation updates the matching existing task',
-  (await call('task_list', { filter: 'all' })).tasks.find((task) => task.id === interfaceTask.created.id)?.title === '飞书端 Agent 值')
+// A two-sided edit is a direction question, exactly like the entry check: the
+// reverse import must NOT quietly overwrite the local value, and it reports the
+// residual conflict so the caller can answer it.
+ok('the Agent confirmation leaves a two-sided edit to the user',
+  (await call('task_list', { filter: 'all' })).tasks.find((task) => task.id === interfaceTask.created.id)?.title === '本地端 Agent 值')
+ok('and reports it as a conflict in the Agent payload',
+  Array.isArray(agentApplied.result.conflicts)
+  && agentApplied.result.conflicts.some((item) => item.key === interfaceTask.created.id
+    && item.changes.some((change) => change.field === FEISHU_FIELDS.title)), agentApplied.result.conflicts)
+ok('the Agent text explains the direction question', agentApplied.text.includes('两端都改过'), agentApplied.text)
+const agentAll = await call('task_sync_feishu', { action: 'resolveAll', direction: 'remote' })
+gate('task_sync_feishu action=resolveAll(remote)', agentAll)
+ok('「全部采用飞书」 imports every pending conflict value',
+  agentAll.result.resolved === 1
+  && (await call('task_list', { filter: 'all' })).tasks.find((task) => task.id === interfaceTask.created.id)?.title === '飞书端 Agent 值',
+  agentAll.result)
+ok('and its text says what moved', agentAll.text.includes('全部采用飞书') && agentAll.text.includes('处理 1 项'), agentAll.text)
 
-interfaceRecord[1][FEISHU_FIELDS.title] = '飞书端 HTTP 值'
+setInterfaceRemoteTitle('飞书端 HTTP 值')
 await call('task_update', { id: interfaceTask.created.id, title: '本地端 HTTP 值' })
 const httpApplyPreview = await api('feishuApplyRemote', { dryRun: true })
 gate('HTTP feishuApplyRemote preview', httpApplyPreview.body)
 ok('the HTTP preview returns a confirmation token',
   typeof httpApplyPreview.body.data.previewToken === 'string', httpApplyPreview.body.data)
+ok('the HTTP preview reports the two-sided field as a conflict',
+  (httpApplyPreview.body.data.conflicts ?? []).some((item) => item.key === interfaceTask.created.id),
+  httpApplyPreview.body.data.conflicts)
 const httpApplied = await api('feishuApplyRemote', { previewToken: httpApplyPreview.body.data.previewToken })
 gate('HTTP feishuApplyRemote confirmation', httpApplied.body)
-ok('the HTTP confirmation updates the existing task',
-  httpApplied.body.data.updated === 1
-  && (await call('task_list', { filter: 'all' })).tasks.find((task) => task.id === interfaceTask.created.id)?.title === '飞书端 HTTP 值',
+ok('the HTTP confirmation refuses to overwrite a two-sided edit',
+  httpApplied.body.data.updated === 0
+  && (await call('task_list', { filter: 'all' })).tasks.find((task) => task.id === interfaceTask.created.id)?.title === '本地端 HTTP 值',
   httpApplied.body.data)
+const httpAll = await api('feishuResolveAllConflicts', { direction: 'local' })
+gate('HTTP feishuResolveAllConflicts (local)', httpAll.body)
+ok('「全部保留本地」 pushes the local value to the table',
+  httpAll.body.data.resolved === 1
+  && interfaceRemoteTitle() === '本地端 HTTP 值'
+  && (await call('task_list', { filter: 'all' })).tasks.find((task) => task.id === interfaceTask.created.id)?.title === '本地端 HTTP 值',
+  httpAll.body.data)
 
-interfaceRecord[1][FEISHU_FIELDS.title] = '飞书端命令值'
+setInterfaceRemoteTitle('飞书端命令值')
 await call('task_update', { id: interfaceTask.created.id, title: '本地端命令值' })
 const commandPreview = await command.handler({ rawInput: 'sync 更新本地预览', commandId: 'todo' })
 ok('the slash command recognizes the documented reverse-preview wording',
@@ -670,10 +701,16 @@ ok('the slash command recognizes the documented reverse-preview wording',
   && commandPreview.text.includes('飞书端命令值'), commandPreview)
 const commandApplied = await command.handler({ rawInput: 'sync 确认更新本地', commandId: 'todo' })
 ok('the slash command confirms the same preview',
-  commandApplied.kind === 'success' && commandApplied.text.includes('已更新 1 项'), commandApplied)
-ok('the slash command imported the Feishu value',
+  commandApplied.kind === 'success' && commandApplied.text.includes('已更新 0 项'), commandApplied)
+const commandAll = await command.handler({ rawInput: 'sync 全部采用飞书', commandId: 'todo' })
+ok('the slash command offers the same bulk Feishu answer',
+  commandAll.kind === 'success' && commandAll.text.includes('全部采用飞书')
+  && commandAll.text.includes('处理 1 项'), commandAll)
+ok('the slash command imported the Feishu value through the bulk answer',
   (await call('task_list', { filter: 'all' })).tasks.find((task) => task.id === interfaceTask.created.id)?.title === '飞书端命令值')
-const currentInterfaceRecord = () => [...feishuRows.entries()].find(([, fields]) => fields['任务ID'] === interfaceTask.created.id)
+const helpText = await command.handler({ rawInput: 'help', commandId: 'todo' })
+ok('the slash help documents both bulk answers',
+  helpText.text.includes('全部保留本地') && helpText.text.includes('全部采用飞书'), helpText.text)
 const entryHttp = await api('feishuEntrySync', { view: 'list' })
 gate('HTTP feishuEntrySync', entryHttp.body)
 ok('the entry endpoint returns enabled task settings without leaking credentials',
